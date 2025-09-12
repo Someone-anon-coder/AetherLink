@@ -11,7 +11,7 @@ public:
     void connect_and_start();
 
 private:
-    mavsdk::Mavsdk _mavsdk;
+    std::unique_ptr<mavsdk::Mavsdk> _mavsdk;
     std::shared_ptr<mavsdk::System> _system;
 };
 
