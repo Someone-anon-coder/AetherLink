@@ -1,0 +1,3 @@
+/app/aetherlink-fc-agent/build/CMakeFiles/fc_agent.dir
+/app/aetherlink-fc-agent/build/CMakeFiles/edit_cache.dir
+/app/aetherlink-fc-agent/build/CMakeFiles/rebuild_cache.dir
