@@ -1,0 +1,18 @@
+#ifndef MAVLINK_MANAGER_H
+#define MAVLINK_MANAGER_H
+
+#include <mavsdk/mavsdk.h>
+#include <mavsdk/plugins/telemetry/telemetry.h>
+#include <memory>
+
+class MavlinkManager {
+public:
+    MavlinkManager();
+    void connect_and_start();
+
+private:
+    mavsdk::Mavsdk _mavsdk;
+    std::shared_ptr<mavsdk::System> _system;
+};
+
+#endif // MAVLINK_MANAGER_H
