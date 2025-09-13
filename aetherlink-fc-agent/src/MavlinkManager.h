@@ -13,6 +13,7 @@ public:
 private:
     std::unique_ptr<mavsdk::Mavsdk> _mavsdk;
     std::shared_ptr<mavsdk::System> _system;
+    std::shared_ptr<mavsdk::Telemetry> _telemetry;
 };
 
 #endif // MAVLINK_MANAGER_H

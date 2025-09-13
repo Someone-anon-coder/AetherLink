@@ -28,16 +28,16 @@ void MavlinkManager::connect_and_start() {
     _mavsdk->subscribe_on_new_system([this]() {
         std::cout << "Discovered a new system\n";
         _system = _mavsdk->systems().front();
-        auto telemetry = std::make_shared<mavsdk::Telemetry>(_system);
+        _telemetry = std::make_shared<mavsdk::Telemetry>(_system);
 
-        telemetry->subscribe_attitude_euler([this](mavsdk::Telemetry::EulerAngle angle) {
+        _telemetry->subscribe_attitude_euler([this](mavsdk::Telemetry::EulerAngle angle) {
             std::cout << "Attitude: "
                       << "Roll(deg): " << angle.roll_deg << ", "
                       << "Pitch(deg): " << angle.pitch_deg << ", "
                       << "Yaw(deg): " << angle.yaw_deg << std::endl;
         });
 
-        telemetry->subscribe_position([this](mavsdk::Telemetry::Position position) {
+        _telemetry->subscribe_position([this](mavsdk::Telemetry::Position position) {
             std::cout << "Position: "
                       << "Lat: " << position.latitude_deg << ", "
                       << "Lon: " << position.longitude_deg << ", "
