@@ -1,7 +1,7 @@
 #ifndef SERIALIZATION_MANAGER_H
 #define SERIALIZATION_MANAGER_H
 
-#include "proto/telemetry.pb.h"
+#include "telemetry.pb.h"
 #include <mavsdk/plugins/telemetry/telemetry.h>
 #include <string>
 

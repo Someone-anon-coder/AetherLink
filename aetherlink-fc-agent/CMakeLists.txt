@@ -19,4 +19,5 @@ add_executable(fc_agent
     ${PROTO_SRCS}
 )
 
-target_link_libraries(fc_agent MAVSDK::mavsdk Protobuf::libprotobuf)
+target_include_directories(fc_agent PUBLIC ${Protobuf_INCLUDE_DIRS})
+target_link_libraries(fc_agent MAVSDK::mavsdk ${Protobuf_LIBRARIES})
