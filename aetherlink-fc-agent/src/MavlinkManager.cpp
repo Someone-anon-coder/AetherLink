@@ -30,18 +30,24 @@ void MavlinkManager::connect_and_start() {
         _system = _mavsdk->systems().front();
         _telemetry = std::make_shared<mavsdk::Telemetry>(_system);
 
+        std::cout << " ========== MAVLINK TELEMETRY ========== " << std::endl;
+
         _telemetry->subscribe_attitude_euler([this](mavsdk::Telemetry::EulerAngle angle) {
-            std::cout << "Attitude: "
-                      << "Roll(deg): " << angle.roll_deg << ", "
-                      << "Pitch(deg): " << angle.pitch_deg << ", "
-                      << "Yaw(deg): " << angle.yaw_deg << std::endl;
+            std::cout << "==============================" << std::endl;
+            std::cout << "== Roll(deg): "  << (std::isnan(angle.roll_deg)  ? "NaN" : std::to_string(angle.roll_deg))  << " == " << std::endl;
+            std::cout << "== Pitch(deg): " << (std::isnan(angle.pitch_deg) ? "NaN" : std::to_string(angle.pitch_deg)) << " == " << std::endl;
+            std::cout << "== Yaw(deg): "   << (std::isnan(angle.yaw_deg)   ? "NaN" : std::to_string(angle.yaw_deg))   << " == " << std::endl;
+            std::cout << "==============================" << std::endl;
         });
 
         _telemetry->subscribe_position([this](mavsdk::Telemetry::Position position) {
-            std::cout << "Position: "
-                      << "Lat: " << position.latitude_deg << ", "
-                      << "Lon: " << position.longitude_deg << ", "
-                      << "Alt(m): " << position.relative_altitude_m << std::endl;
+            std::cout << "==============================" << std::endl;
+            std::cout << "Latitude:  "   << (std::isnan(position.latitude_deg)        ? "NaN" : std::to_string(position.latitude_deg))        << " == " << std::endl;
+            std::cout << "Longitude: "   << (std::isnan(position.longitude_deg)       ? "NaN" : std::to_string(position.longitude_deg))       << " == " << std::endl;
+            std::cout << "Altitude(m): " << (std::isnan(position.relative_altitude_m) ? "NaN" : std::to_string(position.relative_altitude_m)) << " == " << std::endl;
+            std::cout << "==============================" << std::endl;
         });
+
+        std::cout << "====================================================" << std::endl;
     });
 }
