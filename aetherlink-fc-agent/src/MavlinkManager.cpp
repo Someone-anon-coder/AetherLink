@@ -12,7 +12,8 @@
 #include <memory>
 #include <thread>
 
-MavlinkManager::MavlinkManager() {
+MavlinkManager::MavlinkManager() :
+    _secure_transmitter(std::make_unique<SecureTransmitter>("127.0.0.1", 50051)) {
     _mavsdk = std::make_unique<mavsdk::Mavsdk>(
         mavsdk::Mavsdk::Configuration(mavsdk::ComponentType::GroundStation));
 }
@@ -27,6 +28,11 @@ void MavlinkManager::connect_and_start() {
     std::cout << "Waiting for system to connect\n";
     _mavsdk->subscribe_on_new_system([this]() {
         std::cout << "Discovered a new system\n";
+
+        if (!_secure_transmitter->connect()) {
+            return;
+        }
+
         _system = _mavsdk->systems().front();
         _telemetry = std::make_shared<mavsdk::Telemetry>(_system);
 
@@ -42,7 +48,7 @@ void MavlinkManager::connect_and_start() {
             _latest_position = position;
             if (_latest_attitude) {
                 auto serialized_data = _serialization_manager.serialize_telemetry(_latest_attitude.value(), _latest_position.value());
-                std::cout << "Serialized telemetry packet of size: " << serialized_data.size() << " bytes" << std::endl;
+                _secure_transmitter->send(serialized_data);
             }
         });
 

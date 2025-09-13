@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(MAVSDK REQUIRED)
 find_package(Protobuf REQUIRED)
+find_package(Boost REQUIRED COMPONENTS system ssl)
+find_package(OpenSSL REQUIRED)
 
 set(PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/proto/telemetry.proto)
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILES})
@@ -16,8 +18,16 @@ add_executable(fc_agent
     src/main.cpp
     src/MavlinkManager.cpp
     src/SerializationManager.cpp
+    src/SecureTransmitter.cpp
     ${PROTO_SRCS}
 )
 
 target_include_directories(fc_agent PUBLIC ${Protobuf_INCLUDE_DIRS})
-target_link_libraries(fc_agent MAVSDK::mavsdk ${Protobuf_LIBRARIES})
+target_link_libraries(fc_agent
+    MAVSDK::mavsdk
+    ${Protobuf_LIBRARIES}
+    Boost::system
+    Boost::ssl
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)

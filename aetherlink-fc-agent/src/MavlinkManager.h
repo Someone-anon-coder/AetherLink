@@ -7,6 +7,7 @@
 #include <optional>
 #include <mutex>
 #include "SerializationManager.h"
+#include "SecureTransmitter.h"
 
 class MavlinkManager {
 public:
@@ -17,6 +18,7 @@ private:
     std::unique_ptr<mavsdk::Mavsdk> _mavsdk;
     std::shared_ptr<mavsdk::System> _system;
     std::shared_ptr<mavsdk::Telemetry> _telemetry;
+    std::unique_ptr<SecureTransmitter> _secure_transmitter;
 
     std::optional<mavsdk::Telemetry::Position> _latest_position;
     std::optional<mavsdk::Telemetry::EulerAngle> _latest_attitude;
