@@ -33,19 +33,17 @@ void MavlinkManager::connect_and_start() {
         std::cout << " ========== MAVLINK TELEMETRY ========== " << std::endl;
 
         _telemetry->subscribe_attitude_euler([this](mavsdk::Telemetry::EulerAngle angle) {
-            std::cout << "==============================" << std::endl;
-            std::cout << "== Roll(deg): "  << (std::isnan(angle.roll_deg)  ? "NaN" : std::to_string(angle.roll_deg))  << " == " << std::endl;
-            std::cout << "== Pitch(deg): " << (std::isnan(angle.pitch_deg) ? "NaN" : std::to_string(angle.pitch_deg)) << " == " << std::endl;
-            std::cout << "== Yaw(deg): "   << (std::isnan(angle.yaw_deg)   ? "NaN" : std::to_string(angle.yaw_deg))   << " == " << std::endl;
-            std::cout << "==============================" << std::endl;
+            std::lock_guard<std::mutex> lock(_telemetry_mutex);
+            _latest_attitude = angle;
         });
 
         _telemetry->subscribe_position([this](mavsdk::Telemetry::Position position) {
-            std::cout << "==============================" << std::endl;
-            std::cout << "Latitude:  "   << (std::isnan(position.latitude_deg)        ? "NaN" : std::to_string(position.latitude_deg))        << " == " << std::endl;
-            std::cout << "Longitude: "   << (std::isnan(position.longitude_deg)       ? "NaN" : std::to_string(position.longitude_deg))       << " == " << std::endl;
-            std::cout << "Altitude(m): " << (std::isnan(position.relative_altitude_m) ? "NaN" : std::to_string(position.relative_altitude_m)) << " == " << std::endl;
-            std::cout << "==============================" << std::endl;
+            std::lock_guard<std::mutex> lock(_telemetry_mutex);
+            _latest_position = position;
+            if (_latest_attitude) {
+                auto serialized_data = _serialization_manager.serialize_telemetry(_latest_attitude.value(), _latest_position.value());
+                std::cout << "Serialized telemetry packet of size: " << serialized_data.size() << " bytes" << std::endl;
+            }
         });
 
         std::cout << "====================================================" << std::endl;
