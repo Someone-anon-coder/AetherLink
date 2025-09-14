@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(MAVSDK REQUIRED)
 find_package(Protobuf REQUIRED)
-find_package(Boost REQUIRED COMPONENTS system ssl)
+find_package(Boost REQUIRED COMPONENTS system)
 find_package(OpenSSL REQUIRED)
 
 set(PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/proto/telemetry.proto)
@@ -27,7 +27,6 @@ target_link_libraries(fc_agent
     MAVSDK::mavsdk
     ${Protobuf_LIBRARIES}
     Boost::system
-    Boost::ssl
     OpenSSL::SSL
     OpenSSL::Crypto
 )
