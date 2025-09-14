@@ -8,7 +8,7 @@
 
 class SecureTransmitter {
 public:
-    SecureTransmitter(const std::string& address, short port);
+    SecureTransmitter(const std::string& address, uint16_t port);
     bool connect();
     void send(const std::string& data);
 
@@ -17,7 +17,7 @@ private:
     boost::asio::ssl::context _ssl_context;
     std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> _ssl_stream;
     std::string _address;
-    short _port;
+    uint16_t _port;
 };
 
 #endif // SECURE_TRANSMITTER_H
