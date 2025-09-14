@@ -4,7 +4,7 @@
 namespace ssl = boost::asio::ssl;
 using boost::asio::ip::tcp;
 
-SecureTransmitter::SecureTransmitter(const std::string& address, short port)
+SecureTransmitter::SecureTransmitter(const std::string& address, uint16_t port)
     : _ssl_context(ssl::context::tlsv13_client),
       _address(address),
       _port(port) {
