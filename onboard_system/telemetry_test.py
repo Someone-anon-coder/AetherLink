@@ -1,40 +1,53 @@
+import asyncio
+from mavsdk import System
 
-import dronekit
-import time
-import sys
+async def run():
+    """
+    Main coroutine to run the MAVSDK telemetry script.
+    """
+    drone = System()
+    print("--> Initializing MAVSDK...")
+    await drone.connect(system_address="serial:///dev/serial0:57600")
 
-# Define the connection string for Raspberry Pi 3 via GPIO
-connection_string = '/dev/serial0'
-baud_rate = 57600
+    print("--> Waiting for drone to connect...")
+    async for state in drone.core.connection_state():
+        if state.is_connected:
+            print("--> Drone discovered!")
+            break
 
-print("Starting telemetry test script...")
+    print("--- STARTING TELEMETRY ---")
 
-vehicle = None  # Initialize vehicle to None
+    async def print_position(drone):
+        async for position in drone.telemetry.position():
+            print(f"Position: Latitude={position.latitude_deg}, Longitude={position.longitude_deg}, Relative Altitude={position.relative_altitude_m} m")
 
-try:
-    # Connect to the vehicle
-    print(f"--> Connecting to vehicle on: {connection_string}")
-    vehicle = dronekit.connect(connection_string, wait_ready=True, baud=baud_rate, timeout=60)
-    print("--> Vehicle Connected!")
+    async def print_battery(drone):
+        async for battery in drone.telemetry.battery():
+            print(f"Battery: {battery.remaining_percent * 100:.2f}%")
 
-    # Main loop to read and print telemetry data
+    async def print_gps_info(drone):
+        async for gps_info in drone.telemetry.gps_info():
+            print(f"GPS Info: Fix Type={gps_info.fix_type}, Satellites={gps_info.num_satellites}")
+
+    async def print_in_air(drone):
+        async for in_air in drone.telemetry.in_air():
+            print(f"In Air: {in_air}")
+
+    # Create tasks for each telemetry stream
+    asyncio.create_task(print_position(drone))
+    asyncio.create_task(print_battery(drone))
+    asyncio.create_task(print_gps_info(drone))
+    asyncio.create_task(print_in_air(drone))
+
+    # Keep the main coroutine alive
     while True:
-        print("----------------------------------------")
-        print(f" GPS Fix Type: {vehicle.gps_0.fix_type}")
-        print(f" Latitude: {vehicle.location.global_relative_frame.lat}")
-        print(f" Longitude: {vehicle.location.global_relative_frame.lon}")
-        print(f" Relative Altitude: {vehicle.location.global_relative_frame.alt} m")
-        print(f" Battery Voltage: {vehicle.battery.voltage} V")
-        print("----------------------------------------")
-        time.sleep(2)
+        await asyncio.sleep(1)
 
-except KeyboardInterrupt:
-    print("\n--> Script interrupted by user.")
-
-except Exception as e:
-    print(f"--> An error occurred: {e}")
-
-finally:
-    if vehicle:
-        print("--> Closing vehicle connection.")
-        vehicle.close()
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(run())
+    except KeyboardInterrupt:
+        print("--> Script interrupted by user.")
+    finally:
+        loop.close()
