@@ -1,13 +1,21 @@
 import asyncio
 from mavsdk import System
 
+# --- CONFIGURATION ---
+# To connect to a real Pixhawk on a Raspberry Pi via GPIO:
+# CONNECTION_STRING = "serial:///dev/serial0:57600"
+
+# To connect to a PX4 SITL instance running on the same or another machine:
+# Replace
+CONNECTION_STRING = "udp://:14540"
+
 async def run():
     """
     Main coroutine to run the MAVSDK telemetry script.
     """
     drone = System()
-    print("--> Initializing MAVSDK...")
-    await drone.connect(system_address="serial:///dev/serial0:57600")
+    print(f"--> Attempting to connect to MAVSDK via {CONNECTION_STRING}...")
+    await drone.connect(system_address=CONNECTION_STRING)
 
     print("--> Waiting for drone to connect...")
     async for state in drone.core.connection_state():
