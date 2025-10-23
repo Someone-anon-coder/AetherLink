@@ -31,7 +31,7 @@ async def unregister(websocket):
     CONNECTED_CLIENTS.remove(websocket)
     print(f"Client disconnected: {websocket.remote_address}")
 
-async def handler(websocket, path):
+async def handler(websocket, path=None):
     """Handles a single WebSocket client connection."""
     await register(websocket)
     try:
