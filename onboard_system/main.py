@@ -22,27 +22,62 @@ COMMS_HUB_IP = "100.99.103.27"
 COMMS_HUB_PORT = 9999
 
 
-async def stream_telemetry(drone, queue):
-    """Subscribes to MAVSDK telemetry and puts protobuf messages into the queue."""
-    async def subscribe_and_queue(stream, msg_type):
-        async for item in stream:
-            msg = mission_data_pb2.Telemetry()
-            msg.timestamp = time.time()
-            if msg_type == 'position':
-                msg.latitude = item.latitude_deg
-                msg.longitude = item.longitude_deg
-                msg.relative_altitude_m = item.relative_altitude_m
-            elif msg_type == 'battery':
-                msg.battery_voltage = item.voltage_v
 
-            await queue.put(msg)
-            print(f"LOG: Queued {msg_type.capitalize()} packet.")
 
-    # Run subscribers concurrently
-    await asyncio.gather(
-        subscribe_and_queue(drone.telemetry.position(), 'position'),
-        subscribe_and_queue(drone.telemetry.battery(), 'battery')
-    )
+class TelemetryState:
+    """Holds the latest telemetry data in a thread-safe manner."""
+    def __init__(self):
+        self.latitude = 0.0
+        self.longitude = 0.0
+        self.relative_altitude_m = 0.0
+        self.battery_voltage = 0.0
+        self.lock = asyncio.Lock()
+
+    async def get_latest(self):
+        async with self.lock:
+            return {
+                "latitude": self.latitude,
+                "longitude": self.longitude,
+                "relative_altitude_m": self.relative_altitude_m,
+                "battery_voltage": self.battery_voltage,
+            }
+
+    async def update_position(self, position):
+        async with self.lock:
+            self.latitude = position.latitude_deg
+            self.longitude = position.longitude_deg
+            self.relative_altitude_m = position.relative_altitude_m
+
+    async def update_battery(self, battery):
+        async with self.lock:
+            self.battery_voltage = battery.voltage_v
+
+
+async def subscribe_position(drone, state):
+    """Subscribes to position updates and updates the state."""
+    async for position in drone.telemetry.position():
+        await state.update_position(position)
+
+
+async def subscribe_battery(drone, state):
+    """Subscribes to battery updates and updates the state."""
+    async for battery in drone.telemetry.battery():
+        await state.update_battery(battery)
+
+
+async def produce_telemetry_packets(state, queue):
+    """Periodically creates and queues a consolidated telemetry packet."""
+    while True:
+        latest_data = await state.get_latest()
+        msg = mission_data_pb2.Telemetry()
+        msg.timestamp = time.time()
+        msg.latitude = latest_data["latitude"]
+        msg.longitude = latest_data["longitude"]
+        msg.relative_altitude_m = latest_data["relative_altitude_m"]
+        msg.battery_voltage = latest_data["battery_voltage"]
+        await queue.put(msg)
+        print("LOG: Queued consolidated Telemetry packet.")
+        await asyncio.sleep(1.0) # Send a full packet every 1 second
 
 
 def video_processing_thread(queue, loop):
@@ -97,28 +132,30 @@ async def udp_sender(sock, queue):
 
 async def run():
     """Main entry point for the onboard system."""
-    # ... (socket, queue, drone connection logic remains the same) ...
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     queue = asyncio.Queue()
     drone = System()
-    await drone.connect(system_address=MAVSDK_CONNECTION)
+    telemetry_state = TelemetryState()
 
+    await drone.connect(system_address=MAVSDK_CONNECTION)
     print("--> Waiting for drone to connect...")
     async for state in drone.core.connection_state():
         if state.is_connected:
             print("--> Drone discovered!")
             break
 
-    # Start the blocking video thread in the background
+    # Start all tasks as independent, long-running background tasks
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, video_processing_thread, queue, loop)
-    print("LOG: Video processing thread started in background.")
 
-    # Now, run the async tasks concurrently
-    telemetry_task = asyncio.create_task(stream_telemetry(drone, queue))
-    sender_task = asyncio.create_task(udp_sender(sock, queue))
+    # --- Create and forget these tasks ---
+    asyncio.create_task(subscribe_position(drone, telemetry_state))
+    asyncio.create_task(subscribe_battery(drone, telemetry_state))
+    asyncio.create_task(produce_telemetry_packets(telemetry_state, queue))
+    # ------------------------------------
 
-    await asyncio.gather(telemetry_task, sender_task)
+    # The only task we await is the sender, which runs forever.
+    await udp_sender(sock, queue)
 
 
 if __name__ == "__main__":
