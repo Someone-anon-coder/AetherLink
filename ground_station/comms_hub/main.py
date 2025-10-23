@@ -14,8 +14,8 @@ sys.path.insert(0, sys.path[0]+'/../..')
 from shared.protos.mission_data_pb2 import Telemetry, VideoStreamFrame
 
 # --- CONFIGURATION ---
-UDP_LISTEN_IP = "0.0.0.0"
-UDP_LISTEN_PORT = 9999
+VIDEO_UDP_PORT = 9999
+TELEMETRY_UDP_PORT = 9998
 WEBSOCKET_LISTEN_IP = "0.0.0.0"
 WEBSOCKET_LISTEN_PORT = 8765
 
@@ -54,37 +54,37 @@ class UdpProtocol(asyncio.DatagramProtocol):
     """
     The asyncio protocol for handling incoming UDP packets.
     """
+    def __init__(self, data_type):
+        self.data_type = data_type
+        self.transport = None
+        super().__init__()
+
     def connection_made(self, transport):
-        print(f"UDP listener started on {UDP_LISTEN_IP}:{UDP_LISTEN_PORT}")
         self.transport = transport
+        sockname = self.transport.get_extra_info('sockname')
+        print(f"UDP listener for {self.data_type} started on {sockname[0]}:{sockname[1]}")
 
     def datagram_received(self, data, addr):
         """
         This method is called automatically by asyncio whenever a UDP packet is received.
         """
-        # --- This is the critical link ---
-        # 1. Parse the data
-        # 2. Convert it to a JSON string
-        # 3. Create a task to broadcast it to all WebSocket clients
-        
         parsed_message = None
-        message_type = "unknown"
+        
+        if self.data_type == 'video':
+            try:
+                frame = VideoStreamFrame()
+                frame.ParseFromString(data)
+                frame_data_b64 = base64.b64encode(frame.frame_data).decode('utf-8')
+                parsed_message = {
+                    "type": "video_frame",
+                    "timestamp": frame.timestamp,
+                    "frame_id": frame.frame_id,
+                    "frame_data_b64": frame_data_b64
+                }
+            except DecodeError:
+                print(f"Could not decode VideoStreamFrame from {addr}")
 
-        try:
-            # First, try to parse as a VideoStreamFrame
-            frame = VideoStreamFrame()
-            frame.ParseFromString(data)
-            # Base64 encode the binary frame data to make it JSON-safe
-            frame_data_b64 = base64.b64encode(frame.frame_data).decode('utf-8')
-            parsed_message = {
-                "type": "video_frame",
-                "timestamp": frame.timestamp,
-                "frame_id": frame.frame_id,
-                "frame_data_b64": frame_data_b64
-            }
-            message_type = "Video Frame"
-        except DecodeError:
-            # If that fails, it might be a Telemetry message
+        elif self.data_type == 'telemetry':
             try:
                 telemetry = Telemetry()
                 telemetry.ParseFromString(data)
@@ -96,17 +96,12 @@ class UdpProtocol(asyncio.DatagramProtocol):
                     "relative_altitude_m": telemetry.relative_altitude_m,
                     "battery_voltage": telemetry.battery_voltage
                 }
-                message_type = "Telemetry"
             except DecodeError:
-                print(f"Received an unknown/corrupt packet from {addr}")
-
+                print(f"Could not decode Telemetry from {addr}")
+        
         if parsed_message:
-            # If parsing was successful, create a task to broadcast the message
-            # This ensures the UDP listener is not blocked by slow WebSocket clients
             json_message = json.dumps(parsed_message)
             asyncio.create_task(broadcast(json_message))
-            # Optional: Add a log for debugging, but can be noisy
-            # print(f"Received and broadcasting {message_type}")
 
 
 async def main():
@@ -115,10 +110,16 @@ async def main():
     """
     loop = asyncio.get_running_loop()
 
-    # Start the UDP listener
-    udp_transport, udp_protocol = await loop.create_datagram_endpoint(
-        lambda: UdpProtocol(),
-        local_addr=(UDP_LISTEN_IP, UDP_LISTEN_PORT)
+    # Start the UDP listener for Video
+    video_transport, _ = await loop.create_datagram_endpoint(
+        lambda: UdpProtocol(data_type='video'),
+        local_addr=("0.0.0.0", VIDEO_UDP_PORT)
+    )
+
+    # Start the UDP listener for Telemetry
+    telemetry_transport, _ = await loop.create_datagram_endpoint(
+        lambda: UdpProtocol(data_type='telemetry'),
+        local_addr=("0.0.0.0", TELEMETRY_UDP_PORT)
     )
 
     # Start the WebSocket server
@@ -130,7 +131,8 @@ async def main():
         await asyncio.Future()
     finally:
         websocket_server.close()
-        udp_transport.close()
+        video_transport.close()
+        telemetry_transport.close()
 
 
 if __name__ == "__main__":
