@@ -21,30 +21,29 @@ WS_LISTEN_PORT = 8765
 CONNECTED_CLIENTS = set()
 
 # --- WEBSOCKET HANDLERS ---
-async def register(websocket):
-    """Adds a new client to the connected clients set."""
-    CONNECTED_CLIENTS.add(websocket)
-    print(f"Client connected: {websocket.remote_address}")
-
-async def unregister(websocket):
-    """Removes a client from the connected clients set."""
-    CONNECTED_CLIENTS.remove(websocket)
-    print(f"Client disconnected: {websocket.remote_address}")
-
 async def handler(websocket, path=None):
-    """Handles a single WebSocket client connection."""
-    await register(websocket)
+    """Registers a client, keeps the connection open, and unregisters on disconnect."""
+    print(f"Client connected: {websocket.remote_address}")
+    CONNECTED_CLIENTS.add(websocket)
     try:
-        # Keep the connection alive
-        await websocket.wait_closed()
+        # Keep the connection alive by waiting for messages (which we'll ignore)
+        # This will raise an exception when the client disconnects.
+        async for message in websocket:
+            pass
+    except websockets.exceptions.ConnectionClosedError:
+        print(f"Client disconnected: {websocket.remote_address}")
     finally:
-        await unregister(websocket)
+        CONNECTED_CLIENTS.remove(websocket)
+
 
 # --- UDP PROTOCOL ---
 class UdpProtocol(asyncio.DatagramProtocol):
     """
     An asyncio DatagramProtocol for receiving and broadcasting UDP packets.
     """
+    def __init__(self, connected_clients_set):
+        self.connected_clients = connected_clients_set
+
     def datagram_received(self, data, addr):
         """
         Handles incoming UDP datagrams.
@@ -99,7 +98,7 @@ class UdpProtocol(asyncio.DatagramProtocol):
         """
         # Make a copy of the set to avoid issues with clients disconnecting
         # while we are iterating.
-        for client in CONNECTED_CLIENTS.copy():
+        for client in self.connected_clients.copy():
             try:
                 await client.send(message)
             except websockets.exceptions.ConnectionClosed:
@@ -114,11 +113,11 @@ async def main():
     """
     loop = asyncio.get_running_loop()
 
-    # Start the UDP server
-    transport, protocol = await loop.create_datagram_endpoint(
-        lambda: UdpProtocol(),
-        local_addr=(UDP_LISTEN_IP, UDP_LISTEN_PORT),
-        family=socket.AF_INET)
+    # Create the UDP endpoint and pass the client set to the protocol factory
+    await loop.create_datagram_endpoint(
+        lambda: UdpProtocol(CONNECTED_CLIENTS), # This is the key change
+        local_addr=(UDP_LISTEN_IP, UDP_LISTEN_PORT)
+    )
 
     print(f"Comms Hub UDP listener running on {UDP_LISTEN_IP}:{UDP_LISTEN_PORT}")
 
