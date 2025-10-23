@@ -2,6 +2,11 @@ import asyncio
 import cv2
 import socket
 import time
+import sys
+
+sys.path.append('..')
+
+
 from mavsdk import System
 from shared.protos import mission_data_pb2
 
@@ -13,7 +18,7 @@ MAVSDK_CONNECTION = "udp://:14540" # For SITL on the same machine
 GAZEBO_GSTREAMER_PIPELINE = "udpsrc port=5600 ! application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96 ! rtph264depay ! decodebin ! videoconvert ! appsink"
 
 # Ground Station IP and Port (Replace with the Comms Hub's Tailscale IP)
-COMMS_HUB_IP = "100.x.x.x"
+COMMS_HUB_IP = "100.99.103.27"
 COMMS_HUB_PORT = 9999
 
 
