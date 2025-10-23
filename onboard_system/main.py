@@ -17,9 +17,10 @@ MAVSDK_CONNECTION = "udp://:14540" # For SITL on the same machine
 # GStreamer Pipeline for Gazebo Simulation
 GAZEBO_GSTREAMER_PIPELINE = "udpsrc port=5600 ! application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96 ! rtph264depay ! decodebin ! videoconvert ! appsink"
 
-# Ground Station IP and Port (Replace with the Comms Hub's Tailscale IP)
-COMMS_HUB_IP = "100.99.103.27"
-COMMS_HUB_PORT = 9999
+# Ground Station IP and Ports
+COMMS_HUB_IP = "100.x.x.x" # To be filled by user
+VIDEO_PORT = 9999
+TELEMETRY_PORT = 9998
 
 
 
@@ -116,7 +117,7 @@ def video_processing_thread(queue, loop):
         frame_id += 1
 
 
-async def udp_sender(sock, queue):
+async def udp_sender(sock, queue, port, stream_name=""):
     """
     Receives messages from the queue and sends them over a UDP socket.
     """
@@ -124,38 +125,57 @@ async def udp_sender(sock, queue):
     while True:
         msg = await queue.get()
         serialized_msg = msg.SerializeToString()
-        sock.sendto(serialized_msg, (COMMS_HUB_IP, COMMS_HUB_PORT))
+        sock.sendto(serialized_msg, (COMMS_HUB_IP, port))
         packets_sent += 1
         if packets_sent % 100 == 0:
-            print(f"LOG: Sent {packets_sent} packets.")
+            print(f"LOG: Sent {packets_sent} {stream_name} packets.")
 
 
 async def run():
     """Main entry point for the onboard system."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    queue = asyncio.Queue()
+    # Create two sockets, one for each data stream
+    video_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    telemetry_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    # Create two queues, one for each data stream
+    video_queue = asyncio.Queue()
+    telemetry_queue = asyncio.Queue()
+    
     drone = System()
     telemetry_state = TelemetryState()
 
+    print("--> Connecting to drone...")
     await drone.connect(system_address=MAVSDK_CONNECTION)
-    print("--> Waiting for drone to connect...")
+    
     async for state in drone.core.connection_state():
         if state.is_connected:
             print("--> Drone discovered!")
             break
 
-    # Start all tasks as independent, long-running background tasks
+    # Start all producer tasks as independent, long-running background tasks
     loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, video_processing_thread, queue, loop)
+    
+    # Offload the blocking video processing to a separate thread
+    loop.run_in_executor(None, video_processing_thread, video_queue, loop)
 
-    # --- Create and forget these tasks ---
-    asyncio.create_task(subscribe_position(drone, telemetry_state))
-    asyncio.create_task(subscribe_battery(drone, telemetry_state))
-    asyncio.create_task(produce_telemetry_packets(telemetry_state, queue))
-    # ------------------------------------
+    # Telemetry producers are async, so we can create them as tasks
+    telemetry_producers = [
+        subscribe_position(drone, telemetry_state),
+        subscribe_battery(drone, telemetry_state),
+        produce_telemetry_packets(telemetry_state, telemetry_queue)
+    ]
+    
+    # Sender tasks will run forever, sending data from their respective queues
+    sender_tasks = [
+        udp_sender(video_sock, video_queue, VIDEO_PORT, "Video"),
+        udp_sender(telemetry_sock, telemetry_queue, TELEMETRY_PORT, "Telemetry")
+    ]
 
-    # The only task we await is the sender, which runs forever.
-    await udp_sender(sock, queue)
+    # Run all tasks concurrently
+    await asyncio.gather(
+        *telemetry_producers,
+        *sender_tasks
+    )
 
 
 if __name__ == "__main__":
