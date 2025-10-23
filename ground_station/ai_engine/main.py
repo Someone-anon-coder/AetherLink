@@ -4,7 +4,7 @@ import json
 
 # --- CONFIGURATION ---
 # The IP address should be the Tailscale IP of the machine running the Comms Hub.
-COMMS_HUB_IP = "100.x.x.x"
+COMMS_HUB_IP = "100.99.103.27"
 COMMS_HUB_PORT = 8765
 
 async def run():

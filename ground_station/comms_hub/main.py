@@ -1,136 +1,140 @@
+# ground_station/comms_hub/main.py
+
 import asyncio
-import base64
-import json
-import socket
-import sys
 import websockets
+import json
+import base64
+import sys
 from google.protobuf.message import DecodeError
 
 # --- Add Path Modifier ---
-sys.path.append('../../')
+# This allows us to import from the 'shared' directory
+sys.path.insert(0, sys.path[0]+'/../..')
 
 from shared.protos.mission_data_pb2 import Telemetry, VideoStreamFrame
 
 # --- CONFIGURATION ---
 UDP_LISTEN_IP = "0.0.0.0"
 UDP_LISTEN_PORT = 9999
-WS_LISTEN_IP = "0.0.0.0"
-WS_LISTEN_PORT = 8765
+WEBSOCKET_LISTEN_IP = "0.0.0.0"
+WEBSOCKET_LISTEN_PORT = 8765
 
-# --- GLOBAL STATE ---
+# --- STATE ---
+# A set to hold all currently connected WebSocket clients
 CONNECTED_CLIENTS = set()
 
-# --- WEBSOCKET HANDLERS ---
-async def register(websocket):
-    """Adds a new client to the connected clients set."""
-    CONNECTED_CLIENTS.add(websocket)
-    print(f"Client connected: {websocket.remote_address}")
-
-async def unregister(websocket):
-    """Removes a client from the connected clients set."""
-    CONNECTED_CLIENTS.remove(websocket)
-    print(f"Client disconnected: {websocket.remote_address}")
-
+# --- WebSocket Logic ---
 async def handler(websocket, path=None):
-    """Handles a single WebSocket client connection."""
-    await register(websocket)
+    """
+    Handles a single WebSocket client connection. Registers the client
+    and keeps the connection alive until the client disconnects.
+    """
+    global CONNECTED_CLIENTS
+    print(f"Client connected: {websocket.remote_address}")
+    CONNECTED_CLIENTS.add(websocket)
     try:
-        # Keep the connection alive
+        # Keep the connection open and listen for any potential incoming messages
         await websocket.wait_closed()
     finally:
-        await unregister(websocket)
+        print(f"Client disconnected: {websocket.remote_address}")
+        CONNECTED_CLIENTS.remove(websocket)
 
-# --- UDP PROTOCOL ---
+async def broadcast(message):
+    """
+    Broadcasts a message to all connected clients.
+    """
+    # Use asyncio.gather to send messages to all clients concurrently
+    if CONNECTED_CLIENTS:
+        await asyncio.gather(
+            *[client.send(message) for client in CONNECTED_CLIENTS]
+        )
+
+# --- UDP Logic ---
 class UdpProtocol(asyncio.DatagramProtocol):
     """
-    An asyncio DatagramProtocol for receiving and broadcasting UDP packets.
+    The asyncio protocol for handling incoming UDP packets.
     """
+    def connection_made(self, transport):
+        print(f"UDP listener started on {UDP_LISTEN_IP}:{UDP_LISTEN_PORT}")
+        self.transport = transport
+
     def datagram_received(self, data, addr):
         """
-        Handles incoming UDP datagrams.
+        This method is called automatically by asyncio whenever a UDP packet is received.
         """
+        # --- This is the critical link ---
+        # 1. Parse the data
+        # 2. Convert it to a JSON string
+        # 3. Create a task to broadcast it to all WebSocket clients
+        
+        parsed_message = None
+        message_type = "unknown"
+
         try:
             # First, try to parse as a VideoStreamFrame
             frame = VideoStreamFrame()
             frame.ParseFromString(data)
-
-            # Encode frame data as Base64 for JSON safety
-            encoded_frame = base64.b64encode(frame.frame_data).decode('utf-8')
-
-            message = {
-                'type': 'video',
-                'data': {
-                    'frame_id': frame.frame_id,
-                    'timestamp': frame.timestamp,
-                    'frame_data': encoded_frame
-                }
+            # Base64 encode the binary frame data to make it JSON-safe
+            frame_data_b64 = base64.b64encode(frame.frame_data).decode('utf-8')
+            parsed_message = {
+                "type": "video_frame",
+                "timestamp": frame.timestamp,
+                "frame_id": frame.frame_id,
+                "frame_data_b64": frame_data_b64
             }
-            print(f"Received Video Frame #{frame.frame_id} from {addr}")
-
+            message_type = "Video Frame"
         except DecodeError:
             # If that fails, it might be a Telemetry message
             try:
                 telemetry = Telemetry()
                 telemetry.ParseFromString(data)
-
-                message = {
-                    'type': 'telemetry',
-                    'data': {
-                        'latitude': telemetry.latitude,
-                        'longitude': telemetry.longitude,
-                        'altitude': telemetry.altitude,
-                        'speed': telemetry.speed
-                    }
+                parsed_message = {
+                    "type": "telemetry",
+                    "timestamp": telemetry.timestamp,
+                    "latitude": telemetry.latitude,
+                    "longitude": telemetry.longitude,
+                    "relative_altitude_m": telemetry.relative_altitude_m,
+                    "battery_voltage": telemetry.battery_voltage
                 }
-                print(f"Received Telemetry from {addr}: Lat={telemetry.latitude}, Lon={telemetry.longitude}")
-
+                message_type = "Telemetry"
             except DecodeError:
-                # If both fail, it's an unknown packet
-                print(f"Received an unknown packet from {addr}")
-                return
+                print(f"Received an unknown/corrupt packet from {addr}")
 
-        # Broadcast the message to all connected clients
-        json_message = json.dumps(message)
-        asyncio.create_task(self.broadcast(json_message))
+        if parsed_message:
+            # If parsing was successful, create a task to broadcast the message
+            # This ensures the UDP listener is not blocked by slow WebSocket clients
+            json_message = json.dumps(parsed_message)
+            asyncio.create_task(broadcast(json_message))
+            # Optional: Add a log for debugging, but can be noisy
+            # print(f"Received and broadcasting {message_type}")
 
-    async def broadcast(self, message):
-        """
-        Broadcasts a message to all connected WebSocket clients.
-        """
-        # Make a copy of the set to avoid issues with clients disconnecting
-        # while we are iterating.
-        for client in CONNECTED_CLIENTS.copy():
-            try:
-                await client.send(message)
-            except websockets.exceptions.ConnectionClosed:
-                # The client has disconnected. The unregister function will handle
-                # removing it from the set.
-                pass
 
-# --- MAIN COROUTINE ---
 async def main():
     """
-    Main function to run the Comms Hub server.
+    Main entry point. Starts the UDP listener and WebSocket server.
     """
     loop = asyncio.get_running_loop()
 
-    # Start the UDP server
-    transport, protocol = await loop.create_datagram_endpoint(
+    # Start the UDP listener
+    udp_transport, udp_protocol = await loop.create_datagram_endpoint(
         lambda: UdpProtocol(),
-        local_addr=(UDP_LISTEN_IP, UDP_LISTEN_PORT),
-        family=socket.AF_INET)
-
-    print(f"Comms Hub UDP listener running on {UDP_LISTEN_IP}:{UDP_LISTEN_PORT}")
+        local_addr=(UDP_LISTEN_IP, UDP_LISTEN_PORT)
+    )
 
     # Start the WebSocket server
-    server = await websockets.serve(handler, WS_LISTEN_IP, WS_LISTEN_PORT)
-    print(f"Comms Hub WebSocket server running on {WS_LISTEN_IP}:{WS_LISTEN_PORT}")
+    websocket_server = await websockets.serve(handler, WEBSOCKET_LISTEN_IP, WEBSOCKET_LISTEN_PORT)
+    print(f"WebSocket server started on {WEBSOCKET_LISTEN_IP}:{WEBSOCKET_LISTEN_PORT}")
 
-    # Keep the servers running indefinitely
-    await asyncio.Future()
+    try:
+        # Keep the server running forever
+        await asyncio.Future()
+    finally:
+        websocket_server.close()
+        udp_transport.close()
+
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Servers shutting down.")
+        print("\n--> Server shutting down.")
