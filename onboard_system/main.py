@@ -18,7 +18,7 @@ MAVSDK_CONNECTION = "udp://:14540" # For SITL on the same machine
 GAZEBO_GSTREAMER_PIPELINE = "udpsrc port=5600 ! application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96 ! rtph264depay ! decodebin ! videoconvert ! appsink"
 
 # Ground Station IP and Ports
-COMMS_HUB_IP = "100.99.103.27" # To be filled by user
+COMMS_HUB_IP = "100.73.152.43" # To be filled by user
 VIDEO_PORT = 9999
 TELEMETRY_PORT = 9998
 
