@@ -54,8 +54,9 @@ class UdpProtocol(asyncio.DatagramProtocol):
     """
     The asyncio protocol for handling incoming UDP packets.
     """
-    def __init__(self, data_type):
+    def __init__(self, data_type, queue):
         self.data_type = data_type
+        self.queue = queue
         self.transport = None
         super().__init__()
 
@@ -101,7 +102,16 @@ class UdpProtocol(asyncio.DatagramProtocol):
         
         if parsed_message:
             json_message = json.dumps(parsed_message)
-            asyncio.create_task(broadcast(json_message))
+            self.queue.put_nowait(json_message)
+
+
+async def broadcaster(queue):
+    """
+    Pulls messages from the queue and broadcasts them to all clients.
+    """
+    while True:
+        message = await queue.get()
+        await broadcast(message)
 
 
 async def main():
@@ -109,16 +119,20 @@ async def main():
     Main entry point. Starts the UDP listener and WebSocket server.
     """
     loop = asyncio.get_running_loop()
+    broadcast_queue = asyncio.Queue()
+
+    # Start the broadcaster task
+    asyncio.create_task(broadcaster(broadcast_queue))
 
     # Start the UDP listener for Video
     video_transport, _ = await loop.create_datagram_endpoint(
-        lambda: UdpProtocol(data_type='video'),
+        lambda: UdpProtocol(data_type='video', queue=broadcast_queue),
         local_addr=("0.0.0.0", VIDEO_UDP_PORT)
     )
 
     # Start the UDP listener for Telemetry
     telemetry_transport, _ = await loop.create_datagram_endpoint(
-        lambda: UdpProtocol(data_type='telemetry'),
+        lambda: UdpProtocol(data_type='telemetry', queue=broadcast_queue),
         local_addr=("0.0.0.0", TELEMETRY_UDP_PORT)
     )
 
