@@ -3,4 +3,3 @@ protobuf
 ultralytics
 opencv-python
 numpy
-haversine
