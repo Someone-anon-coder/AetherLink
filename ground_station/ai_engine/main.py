@@ -26,37 +26,50 @@ class MissionLogic:
     def __init__(self):
         self.current_state = MissionState.STANDBY
         self.detected_objects = []
-        self.latest_telemetry = {}
+        self.latest_telemetry = None # Initialize as None until first telemetry packet arrives
         self.survey_altitude_m = 15.0
         self.duplicate_distance_m = 10.0
 
     async def process_packet(self, packet):
+        # Update telemetry regardless of type to ensure it's always current
         if packet['type'] == 'telemetry':
-            self.latest_telemetry = packet
+            self.latest_telemetry = packet['data']
         
         if self.current_state == MissionState.STANDBY:
-            await self._handle_standby_state(packet)
+            # We only need to check telemetry packets for state transitions
+            if packet['type'] == 'telemetry':
+                await self._handle_standby_state(packet['data'])
         elif self.current_state == MissionState.EXECUTING_SURVEY:
+            # The survey state needs to process video frames
             await self._handle_survey_state(packet)
 
-    async def _handle_standby_state(self, packet):
-        if packet['type'] == 'telemetry':
-            if packet.get('relative_altitude_m', 0) > 5.0:
-                self.current_state = MissionState.EXECUTING_SURVEY
-                print("LOG: Drone is airborne. Switching to EXECUTING_SURVEY state.")
+    async def _handle_standby_state(self, telemetry_data):
+        if telemetry_data.get('relative_altitude_m', 0) > 5.0:
+            self.current_state = MissionState.EXECUTING_SURVEY
+            print("LOG: Drone is airborne. Switching to EXECUTING_SURVEY state.")
 
     async def _handle_survey_state(self, packet):
-        if packet['type'] == 'video_frame' and 'detections' in packet:
+        # Only process detections if we have both a video frame and recent telemetry data
+        if packet['type'] == 'video_frame' and 'detections' in packet and self.latest_telemetry:
             for detection in packet['detections']:
                 world_coords = self._calculate_world_coordinates(detection['box'], self.latest_telemetry)
-                if not self._is_duplicate(world_coords):
-                    class_name = detection['class_name']
-                    lat, lon = world_coords
-                    self.detected_objects.append({'class_name': class_name, 'coords': world_coords})
-                    print(f"** UNIQUE OBJECT LOGGED: {class_name} at ({lat}, {lon}) **")
+                # Ensure coordinates are valid before processing
+                if world_coords[0] is not None and world_coords[1] is not None:
+                    if not self._is_duplicate(world_coords):
+                        class_name = detection['class_name']
+                        lat, lon = world_coords
+                        self.detected_objects.append({'class_name': class_name, 'coords': world_coords})
+                        print(f"** UNIQUE OBJECT LOGGED: {class_name} at ({lat}, {lon}) **")
 
     def _calculate_world_coordinates(self, detection_pixel_coords, drone_telemetry):
-        return (drone_telemetry.get('latitude'), drone_telemetry.get('longitude'))
+        # Placeholder: In a real implementation, this would involve complex geometric calculations.
+        # For now, we'll just use the drone's current GPS coordinates as the object's coordinates.
+        if drone_telemetry:
+            lat = drone_telemetry.get('latitude_deg', None)
+            lon = drone_telemetry.get('longitude_deg', None)
+            if lat is not None and lon is not None:
+                return (lat, lon)
+        return (None, None) # Return None if telemetry is missing or incomplete
 
     def _is_duplicate(self, new_coords):
         for obj in self.detected_objects:
