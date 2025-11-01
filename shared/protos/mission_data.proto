@@ -1,0 +1,61 @@
+// Aetherlink Protocol Definition for AeroTHON 2025
+syntax = "proto3";
+
+// Telemetry data packet from the drone.
+message Telemetry {
+    double timestamp = 1;       // UTC timestamp
+    double latitude = 2;
+    double longitude = 3;
+    float relative_altitude_m = 4;
+    float battery_voltage = 5;
+    float ground_speed_mps = 6;
+}
+
+// A single video frame packet from the drone.
+message VideoStreamFrame {
+    double timestamp = 1;       // UTC timestamp
+    uint64 frame_id = 2;        // Sequential frame number
+    bytes frame_data = 3;       // The raw JPEG/H.264 frame
+}
+
+// An object detection result from the AI Engine.
+message DetectionResult {
+    message BoundingBox {
+        float x_center = 1;     // Normalized (0.0 to 1.0)
+        float y_center = 2;     // Normalized (0.0 to 1.0)
+        float width = 3;        // Normalized (0.0 to 1.0)
+        float height = 4;       // Normalized (0.0 to 1.0)
+    }
+
+    double timestamp = 1;       // UTC timestamp of the frame it was detected in
+    string object_name = 2;
+    float confidence = 3;
+    BoundingBox box = 4;
+}
+
+// A command packet from the ground station to the drone.
+message SystemCommand {
+    enum CommandType {
+        NONE = 0;
+        GOTO_LOCATION = 1;
+        SET_SERVO = 2;
+        RETURN_TO_LAUNCH = 3;
+    }
+
+    message Location {
+        double latitude = 1;
+        double longitude = 2;
+        float altitude_m = 3;
+    }
+
+    message Servo {
+        uint32 servo_id = 1;
+        uint32 pwm_value = 2;
+    }
+
+    CommandType command_type = 1;
+    oneof payload {
+        Location location = 2;
+        Servo servo = 3;
+    }
+}

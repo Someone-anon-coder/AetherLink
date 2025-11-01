@@ -1,0 +1,5 @@
+mavsdk
+asyncio
+opencv-python
+protobuf
+picamera2
