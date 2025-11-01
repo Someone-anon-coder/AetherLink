@@ -1,0 +1,4 @@
+websockets
+PyQt6
+opencv-python
+numpy
