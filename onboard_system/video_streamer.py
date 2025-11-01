@@ -9,7 +9,7 @@ from picamera2 import Picamera2
 from shared.protos import mission_data_pb2
 
 # Configuration
-COMMS_HUB_IP = "192.168.1.2"  # Placeholder - Replace with actual IP
+COMMS_HUB_IP = "100.73.152.43" # <-- USER: Set this to the Tailscale IP of the Comms Hub machine
 VIDEO_PORT = 9999
 
 def main():

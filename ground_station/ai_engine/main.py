@@ -10,7 +10,7 @@ from haversine import haversine, Unit
 
 # --- CONFIGURATION ---
 # The IP address should be the Tailscale IP of the machine running the Comms Hub.
-COMMS_HUB_IP = "100.73.152.43"
+COMMS_HUB_IP = "100.73.152.43" # <-- USER: Set this to the Tailscale IP of the Comms Hub machine
 COMMS_HUB_PORT = 8765
 
 # Load the trained YOLOv8 model once.
@@ -75,6 +75,7 @@ async def run():
         try:
             print(f"--- Connected to Comms Hub at {uri} ---")
             async for message in websocket:
+                print(f"DEBUG: Raw message received, size: {len(message)}") # <-- ADD THIS LINE
                 data = json.loads(message)
                 
                 if data.get('type') == 'video_frame':
