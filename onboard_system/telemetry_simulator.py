@@ -14,7 +14,7 @@ from shared.protos import mission_data_pb2
 MAVSDK_CONNECTION = "udp://:14540" # For SITL on the same machine
 
 # Ground Station IP and Ports
-COMMS_HUB_IP = "100.73.152.43" # To be filled by user
+COMMS_HUB_IP = "100.73.152.43" # <-- USER: Set this to the Tailscale IP of the Comms Hub machine
 TELEMETRY_PORT = 9998
 
 class TelemetryState:
