@@ -2,4 +2,4 @@ mavsdk
 asyncio
 opencv-python
 protobuf
-picamera[array]
+picamera2
