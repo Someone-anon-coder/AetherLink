@@ -1,11 +1,2 @@
-# Virtual Environment
-venv/
-__pycache__/
-
-# Compiled Python files
-*.pyc
-
-# IDE-specific folders
-.idea/
-.vscode/
-shared/protos/mission_data_pb2.py
+./aetherlink-fc-agent/build/
+./aetherlink-fc-agent/certs/
