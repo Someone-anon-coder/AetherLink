@@ -8,34 +8,72 @@ import sys
 import struct
 from google.protobuf.message import DecodeError
 
+from google.protobuf import json_format
+import socket
+
 # --- Add Path Modifier ---
 # This allows us to import from the 'shared' directory
 sys.path.insert(0, sys.path[0]+'/../..')
 
-from shared.protos.mission_data_pb2 import Telemetry, VideoStreamFrame
+from shared.protos.mission_data_pb2 import Telemetry, VideoStreamFrame, SystemCommand
 
 # --- CONFIGURATION ---
 VIDEO_UDP_PORT = 9999
 TELEMETRY_UDP_PORT = 9998
+COMMAND_UDP_PORT = 9997
+ONBOARD_SYSTEM_IP = "127.0.0.1" # For local testing
 WEBSOCKET_LISTEN_IP = "0.0.0.0"
 WEBSOCKET_LISTEN_PORT = 8765
 
 # --- STATE ---
 # A set to hold all currently connected WebSocket clients
 CONNECTED_CLIENTS = set()
+# A UDP socket for sending commands, created once at startup
+COMMAND_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
 
 # --- WebSocket Logic ---
+async def receiver_task(websocket):
+    """Handles receiving messages from a single client."""
+    async for message in websocket:
+        try:
+            data = json.loads(message)
+            if data.get("type") == "system_command":
+                command_dict = data.get("command", {})
+
+                # Convert dict to protobuf message
+                command_proto = SystemCommand()
+                json_format.ParseDict(command_dict, command_proto)
+
+                # Serialize to bytes
+                serialized_command = command_proto.SerializeToString()
+
+                # Relay over UDP
+                COMMAND_SOCKET.sendto(serialized_command, (ONBOARD_SYSTEM_IP, COMMAND_UDP_PORT))
+
+                command_name = SystemCommand.CommandType.Name(command_proto.command_type)
+                print(f"RELAY: Relaying command {command_name} to onboard system at {ONBOARD_SYSTEM_IP}:{COMMAND_UDP_PORT}")
+
+        except json.JSONDecodeError:
+            print("Error decoding JSON from client")
+        except Exception as e:
+            print(f"An error occurred in receiver_task: {e}")
+
+
 async def handler(websocket, path=None):
     """
-    Handles a single WebSocket client connection. Registers the client
-    and keeps the connection alive until the client disconnects.
+    Handles a client connection, registering it for broadcasts and
+    concurrently listening for incoming commands to relay.
     """
     global CONNECTED_CLIENTS
     print(f"Client connected: {websocket.remote_address}")
     CONNECTED_CLIENTS.add(websocket)
     try:
-        # Keep the connection open and listen for any potential incoming messages
-        await websocket.wait_closed()
+        # Run a task to listen for incoming messages and a task that completes when the connection is closed
+        await asyncio.gather(
+            receiver_task(websocket),
+            websocket.wait_closed()
+        )
     finally:
         print(f"Client disconnected: {websocket.remote_address}")
         CONNECTED_CLIENTS.remove(websocket)
