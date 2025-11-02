@@ -34,8 +34,9 @@ class MissionState(Enum):
 
 
 class MissionLogic:
-    def __init__(self, command_queue):
+    def __init__(self, command_queue, broadcast_queue):
         self.command_queue = command_queue
+        self.broadcast_queue = broadcast_queue
         self.current_state = MissionState.STANDBY
         self.detected_objects = []
         self.latest_telemetry = {}
@@ -43,6 +44,13 @@ class MissionLogic:
         self.duplicate_distance_m = 10.0
         self.resume_point = None
         self.payload_dropped = False
+
+    async def _set_state(self, new_state):
+        """Helper to change state and broadcast the change."""
+        if self.current_state != new_state:
+            self.current_state = new_state
+            print(f"LOG: State changed to {new_state.name}.")
+            await self.broadcast_queue.put({'type': 'mission_state', 'state': new_state.name})
 
     async def process_packet(self, packet):
         if packet['type'] == 'telemetry':
@@ -64,8 +72,7 @@ class MissionLogic:
     async def _handle_standby_state(self, packet):
         if packet['type'] == 'telemetry':
             if packet.get('relative_altitude_m', 0) > 5.0:
-                self.current_state = MissionState.EXECUTING_SURVEY
-                print("LOG: Drone is airborne. Switching to EXECUTING_SURVEY state.")
+                await self._set_state(MissionState.EXECUTING_SURVEY)
 
     async def _handle_executing_survey_state(self, packet):
         if packet['type'] == 'video_frame' and 'detections' in packet:
@@ -75,7 +82,9 @@ class MissionLogic:
                     class_name = detection['class_name']
                     lat, lon = world_coords
                     self.detected_objects.append({'class_name': class_name, 'coords': world_coords})
-                    print(f"** UNIQUE OBJECT LOGGED: {class_name} at ({lat}, {lon}) **")
+                    log_msg = f"LOGGED: {class_name} at ({lat:.5f}, {lon:.5f})"
+                    print(f"** {log_msg} **")
+                    await self.broadcast_queue.put({'type': 'mission_log', 'message': log_msg})
 
             # --- Simulated Disaster Detection Placeholder ---
             if 'disaster_zone' in [d['class_name'] for d in packet.get('detections', [])] and not self.payload_dropped:
@@ -83,11 +92,10 @@ class MissionLogic:
                 self.resume_point = self.latest_telemetry  # Save current telemetry as resume point
                 # For now, we don't save the next waypoint, just the location.
                 print(f"LOG: Saving resume point at {self.resume_point['latitude']}, {self.resume_point['longitude']}")
-                self.current_state = MissionState.TRANSITING_TO_DROP_ZONE
-                print("LOG: State changed to TRANSITING_TO_DROP_ZONE.")
+                await self._set_state(MissionState.TRANSITING_TO_DROP_ZONE)
 
         if self._is_survey_complete() and self.payload_dropped:
-            self.current_state = MissionState.RETURNING_TO_LAUNCH
+            await self._set_state(MissionState.RETURNING_TO_LAUNCH)
 
     async def _send_command(self, command_type, payload_data=None):
         """Creates a command dictionary and puts it on the queue."""
@@ -108,8 +116,7 @@ class MissionLogic:
             location_payload = {"latitude": disaster_coords[0], "longitude": disaster_coords[1], "altitude_m": self.survey_altitude_m}
             await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload_data=location_payload)
 
-        self.current_state = MissionState.PERFORMING_PAYLOAD_DROP
-        print("LOG: State changed to PERFORMING_PAYLOAD_DROP.")
+        await self._set_state(MissionState.PERFORMING_PAYLOAD_DROP)
 
 
     async def _handle_performing_payload_drop_state(self, packet):
@@ -140,11 +147,9 @@ class MissionLogic:
         await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload_data=ascend_payload)
 
         if self.resume_point:
-            self.current_state = MissionState.RESUMING_SURVEY
-            print("LOG: State changed to RESUMING_SURVEY.")
+            await self._set_state(MissionState.RESUMING_SURVEY)
         else:
-            self.current_state = MissionState.RETURNING_TO_LAUNCH
-            print("LOG: State changed to RETURNING_TO_LAUNCH.")
+            await self._set_state(MissionState.RETURNING_TO_LAUNCH)
 
     async def _handle_resuming_survey_state(self, packet):
         # Command the drone to fly back to the resume point
@@ -158,9 +163,8 @@ class MissionLogic:
         # In a real system, you'd need a way to tell the flight controller to resume its mission plan.
         # This is a placeholder for that logic.
         print("LOG: Commanded drone to resume point. Resuming survey.")
-        self.current_state = MissionState.EXECUTING_SURVEY
+        await self._set_state(MissionState.EXECUTING_SURVEY)
         self.resume_point = None # Clear the resume point
-        print("LOG: State changed to EXECUTING_SURVEY.")
 
 
     async def _handle_returning_to_launch_state(self, packet):
@@ -185,15 +189,32 @@ class MissionLogic:
 
 async def command_sender(websocket, queue):
     """
-    Waits for a command from the queue and sends it.
+    Waits for a command from the queue and sends it. This is for commands
+    that are destined for the onboard system.
     """
     while True:
         command_json = await queue.get()
         try:
             await websocket.send(command_json)
-            print(f"SENT: {command_json}")
+            print(f"SENT CMD: {command_json}")
         except websockets.ConnectionClosed:
             print("Cannot send command, connection is closed.")
+            break
+        finally:
+            queue.task_done()
+
+async def broadcast_sender(websocket, queue):
+    """
+    Waits for a message from the broadcast queue and sends it. This is for
+    status messages that should be broadcast to all clients (like the dashboard).
+    """
+    while True:
+        message = await queue.get()
+        try:
+            await websocket.send(json.dumps(message))
+            print(f"SENT BCAST: {json.dumps(message)}")
+        except websockets.ConnectionClosed:
+            print("Cannot send broadcast, connection is closed.")
             break
         finally:
             queue.task_done()
@@ -201,20 +222,22 @@ async def command_sender(websocket, queue):
 
 async def run():
     """
-    Connects to the Comms Hub WebSocket server, creates a command queue,
-    and runs the command sender and message processor concurrently.
+    Connects to the Comms Hub WebSocket server, creates necessary queues,
+    and runs the sender tasks and message processor concurrently.
     """
     uri = f"ws://{COMMS_HUB_IP}:{COMMS_HUB_PORT}"
     command_queue = asyncio.Queue()
-    mission_logic = MissionLogic(command_queue)
+    broadcast_queue = asyncio.Queue()
+    mission_logic = MissionLogic(command_queue, broadcast_queue)
     start_time = time.time()
 
     async for websocket in websockets.connect(uri):
         try:
             print(f"--- Connected to Comms Hub at {uri} ---")
 
-            # Start the command sender task
-            sender_task = asyncio.create_task(command_sender(websocket, command_queue))
+            # Start the sender tasks
+            command_sender_task = asyncio.create_task(command_sender(websocket, command_queue))
+            broadcast_sender_task = asyncio.create_task(broadcast_sender(websocket, broadcast_queue))
 
             # Run the message processing loop
             async for message in websocket:
@@ -243,9 +266,10 @@ async def run():
 
                 await mission_logic.process_packet(data)
 
-            # Once the message loop is broken, cancel the sender task
-            sender_task.cancel()
-            await asyncio.gather(sender_task, return_exceptions=True)
+            # Once the message loop is broken, cancel the sender tasks
+            command_sender_task.cancel()
+            broadcast_sender_task.cancel()
+            await asyncio.gather(command_sender_task, broadcast_sender_task, return_exceptions=True)
 
         except websockets.ConnectionClosed:
             print("--- Connection to Comms Hub lost. Attempting to reconnect... ---")
