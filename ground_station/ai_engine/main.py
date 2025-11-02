@@ -89,26 +89,24 @@ class MissionLogic:
         if self._is_survey_complete() and self.payload_dropped:
             self.current_state = MissionState.RETURNING_TO_LAUNCH
 
-    async def _send_command(self, command_type, payload=None):
-        """Creates a SystemCommand protobuf message and puts it on the queue."""
-        cmd = SystemCommand()
-        cmd.command_type = command_type
-        if payload:
-            # The 'payload' is another protobuf message like Location or Servo
-            cmd.payload.CopyFrom(payload)
-
-        await self.command_queue.put(cmd)
-        print(f"CMD: Queued command: {SystemCommand.CommandType.Name(command_type)}")
+    async def _send_command(self, command_type, payload_data=None):
+        """Creates a command dictionary and puts it on the queue."""
+        command_message = {
+            "type": "system_command",
+            "command_name": SystemCommand.CommandType.Name(command_type),
+            "payload": payload_data # payload_data will be a simple dict
+        }
+        await self.command_queue.put(json.dumps(command_message))
+        print(f"CMD: Queued command: {command_message['command_name']}")
 
     async def _handle_transiting_to_drop_zone_state(self, packet):
         # For this example, we'll command it to the location where the disaster was detected.
         # A real implementation might have a predefined drop zone.
         if self.resume_point:
-            lat = self.resume_point.get('latitude')
-            lon = self.resume_point.get('longitude')
-            alt = self.resume_point.get('relative_altitude_m')
-            location_payload = SystemCommand.Location(latitude=lat, longitude=lon, altitude_m=alt)
-            await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload=location_payload)
+            disaster_coords = (self.resume_point.get('latitude'), self.resume_point.get('longitude'))
+            # Assuming disaster_coords is a tuple (lat, lon)
+            location_payload = {"latitude": disaster_coords[0], "longitude": disaster_coords[1], "altitude_m": self.survey_altitude_m}
+            await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload_data=location_payload)
 
         self.current_state = MissionState.PERFORMING_PAYLOAD_DROP
         print("LOG: State changed to PERFORMING_PAYLOAD_DROP.")
@@ -116,30 +114,30 @@ class MissionLogic:
 
     async def _handle_performing_payload_drop_state(self, packet):
         # Create a Location payload for descending
-        descend_payload = SystemCommand.Location(
-            latitude=self.latest_telemetry.get('latitude'),
-            longitude=self.latest_telemetry.get('longitude'),
-            altitude_m=10.0
-        )
-        await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload=descend_payload)
+        descend_payload = {
+            "latitude": self.latest_telemetry.get('latitude'),
+            "longitude": self.latest_telemetry.get('longitude'),
+            "altitude_m": 10.0
+        }
+        await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload_data=descend_payload)
 
         await asyncio.sleep(5) # Simulate time to descend and search
 
         # Create a Servo payload for actuating the gripper
-        servo_payload = SystemCommand.Servo(servo_id=0, pwm_value=1800) # Assuming servo 0 and PWM for 'open'
-        await self._send_command(SystemCommand.CommandType.SET_SERVO, payload=servo_payload)
+        servo_payload = {"servo_id": 0, "pwm_value": 1800}
+        await self._send_command(SystemCommand.CommandType.SET_SERVO, payload_data=servo_payload)
         self.payload_dropped = True
         print("LOG: Payload has been dropped.")
 
         await asyncio.sleep(2) # Allow time for drop
 
         # Create a Location payload for ascending back to survey altitude
-        ascend_payload = SystemCommand.Location(
-            latitude=self.latest_telemetry.get('latitude'),
-            longitude=self.latest_telemetry.get('longitude'),
-            altitude_m=self.survey_altitude_m
-        )
-        await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload=ascend_payload)
+        ascend_payload = {
+            "latitude": self.latest_telemetry.get('latitude'),
+            "longitude": self.latest_telemetry.get('longitude'),
+            "altitude_m": self.survey_altitude_m
+        }
+        await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload_data=ascend_payload)
 
         if self.resume_point:
             self.current_state = MissionState.RESUMING_SURVEY
@@ -150,12 +148,12 @@ class MissionLogic:
 
     async def _handle_resuming_survey_state(self, packet):
         # Command the drone to fly back to the resume point
-        resume_payload = SystemCommand.Location(
-            latitude=self.resume_point.get('latitude'),
-            longitude=self.resume_point.get('longitude'),
-            altitude_m=self.resume_point.get('relative_altitude_m')
-        )
-        await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload=resume_payload)
+        resume_payload = {
+            "latitude": self.resume_point.get('latitude'),
+            "longitude": self.resume_point.get('longitude'),
+            "altitude_m": self.resume_point.get('relative_altitude_m')
+        }
+        await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload_data=resume_payload)
 
         # In a real system, you'd need a way to tell the flight controller to resume its mission plan.
         # This is a placeholder for that logic.
@@ -187,26 +185,15 @@ class MissionLogic:
 
 async def command_sender(websocket, queue):
     """
-    Waits for a command from the queue, serializes it, and sends it.
+    Waits for a command from the queue and sends it.
     """
     while True:
-        command = await queue.get()
-        # Convert protobuf message to a dictionary
-        command_dict = json_format.MessageToDict(command, preserving_proto_field_name=True)
-
-        # Wrap it in our standard JSON structure
-        json_payload = {
-            "type": "system_command",
-            "command": command_dict
-        }
-        json_str = json.dumps(json_payload)
-
+        command_json = await queue.get()
         try:
-            await websocket.send(json_str)
-            print(f"SENT: {json_str}")
+            await websocket.send(command_json)
+            print(f"SENT: {command_json}")
         except websockets.ConnectionClosed:
             print("Cannot send command, connection is closed.")
-            # The main loop will handle reconnection. We can just exit this task.
             break
         finally:
             queue.task_done()

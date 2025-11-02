@@ -21,6 +21,7 @@ from shared.protos.mission_data_pb2 import Telemetry, VideoStreamFrame, SystemCo
 VIDEO_UDP_PORT = 9999
 TELEMETRY_UDP_PORT = 9998
 COMMAND_UDP_PORT = 9997
+COMMAND_PORT = 9997
 ONBOARD_SYSTEM_IP = "127.0.0.1" # For local testing
 WEBSOCKET_LISTEN_IP = "0.0.0.0"
 WEBSOCKET_LISTEN_PORT = 8765
@@ -33,50 +34,57 @@ COMMAND_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
 # --- WebSocket Logic ---
-async def receiver_task(websocket):
-    """Handles receiving messages from a single client."""
-    async for message in websocket:
-        try:
-            data = json.loads(message)
-            if data.get("type") == "system_command":
-                command_dict = data.get("command", {})
-
-                # Convert dict to protobuf message
-                command_proto = SystemCommand()
-                json_format.ParseDict(command_dict, command_proto)
-
-                # Serialize to bytes
-                serialized_command = command_proto.SerializeToString()
-
-                # Relay over UDP
-                COMMAND_SOCKET.sendto(serialized_command, (ONBOARD_SYSTEM_IP, COMMAND_UDP_PORT))
-
-                command_name = SystemCommand.CommandType.Name(command_proto.command_type)
-                print(f"RELAY: Relaying command {command_name} to onboard system at {ONBOARD_SYSTEM_IP}:{COMMAND_UDP_PORT}")
-
-        except json.JSONDecodeError:
-            print("Error decoding JSON from client")
-        except Exception as e:
-            print(f"An error occurred in receiver_task: {e}")
-
-
 async def handler(websocket, path=None):
     """
-    Handles a client connection, registering it for broadcasts and
-    concurrently listening for incoming commands to relay.
+    Handles a WebSocket client. Registers for broadcasting and listens for commands.
     """
     global CONNECTED_CLIENTS
     print(f"Client connected: {websocket.remote_address}")
     CONNECTED_CLIENTS.add(websocket)
+
+    # Create a dedicated UDP socket for sending commands for this client
+    command_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
     try:
-        # Run a task to listen for incoming messages and a task that completes when the connection is closed
-        await asyncio.gather(
-            receiver_task(websocket),
-            websocket.wait_closed()
-        )
+        # Listen for incoming messages (commands) from this client
+        async for message in websocket:
+            try:
+                data = json.loads(message)
+                if data.get("type") == "system_command":
+                    command_name_str = data.get("command_name")
+                    payload_dict = data.get("payload")
+
+                    # Convert string name back to enum value
+                    command_type = SystemCommand.CommandType.Value(command_name_str)
+
+                    cmd_proto = SystemCommand()
+                    cmd_proto.command_type = command_type
+
+                    # Populate payload if it exists
+                    if payload_dict:
+                        if command_type == SystemCommand.CommandType.GOTO_LOCATION:
+                            cmd_proto.location.latitude = payload_dict['latitude']
+                            cmd_proto.location.longitude = payload_dict['longitude']
+                            cmd_proto.location.altitude_m = payload_dict['altitude_m']
+                        elif command_type == SystemCommand.CommandType.SET_SERVO:
+                            cmd_proto.servo.servo_id = payload_dict['servo_id']
+                            cmd_proto.servo.pwm_value = payload_dict['pwm_value']
+
+                    # Serialize and send to the onboard system's IP (from telemetry)
+                    # NOTE: For now, we hardcode the target IP. This will be dynamic later.
+                    ONBOARD_IP = "100.122.254.14" # The IP of your Raspberry Pi
+                    serialized_cmd = cmd_proto.SerializeToString()
+                    command_sock.sendto(serialized_cmd, (ONBOARD_IP, COMMAND_PORT))
+                    print(f"RELAY: Relaying command {command_name_str} to {ONBOARD_IP}:{COMMAND_PORT}")
+
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                print(f"Error processing command from client: {e}")
+
+    except websockets.ConnectionClosed:
+        print(f"Client {websocket.remote_address} disconnected.")
     finally:
-        print(f"Client disconnected: {websocket.remote_address}")
         CONNECTED_CLIENTS.remove(websocket)
+        command_sock.close()
 
 async def broadcast(message):
     """
