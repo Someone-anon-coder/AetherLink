@@ -68,37 +68,25 @@ class DashboardApp(customtkinter.CTk):
         try:
             data = self.data_queue.get_nowait()
 
-            if data['type'] == 'telemetry':
-                self.lat_label.configure(text=f"Lat: {data['data']['latitude']:.6f}")
-                self.lon_label.configure(text=f"Lon: {data['data']['longitude']:.6f}")
-                self.alt_label.configure(text=f"Alt: {data['data']['altitude']:.2f} m")
-                self.battery_label.configure(text=f"Battery: {data['data']['battery_percent']:.2f}%")
+            if data.get('type') == 'telemetry':
+                self.lat_label.configure(text=f"Lat: {data.get('latitude', 0):.6f}")
+                self.lon_label.configure(text=f"Lon: {data.get('longitude', 0):.6f}")
+                self.alt_label.configure(text=f"Alt: {data.get('relative_altitude_m', 0):.2f} m")
+                self.battery_label.configure(text=f"Battery: {data.get('battery_voltage', 0):.2f}%")
 
-            elif data['type'] == 'video_frame':
-                image_data = base64.b64decode(data['data']['frame'])
+            elif data.get('type') == 'video_frame':
+                image_data = base64.b64decode(data.get('frame_data_b64', ''))
                 image = Image.open(io.BytesIO(image_data))
                 ctk_image = customtkinter.CTkImage(light_image=image, dark_image=image, size=(640, 480))
                 self.video_label.configure(image=ctk_image, text="")
 
-            elif data['type'] == 'mission_state':
-                 self.mission_state_label.configure(text=f"Mission State: {data['data']['state']}")
+            elif data.get('type') == 'mission_state':
+                self.mission_state_label.configure(text=f"Mission State: {data.get('state', 'N/A')}")
 
-            elif data['type'] == 'detection':
-                detection = data['data']
-                detection_id = (
-                    detection['class_name'],
-                    round(detection['latitude'], 5),
-                    round(detection['longitude'], 5)
-                )
-                if detection_id not in self.displayed_detections:
-                    self.displayed_detections.add(detection_id)
-                    log_message = (
-                        f"New Detection: {detection['class_name']} @ "
-                        f"({detection['latitude']:.5f}, {detection['longitude']:.5f})\n"
-                    )
-                    self.mission_log.configure(state="normal")
-                    self.mission_log.insert("end", log_message)
-                    self.mission_log.configure(state="disabled")
+            elif data.get('type') == 'mission_log':
+                self.mission_log.configure(state="normal")
+                self.mission_log.insert('end', data.get('message', '') + '\n')
+                self.mission_log.configure(state="disabled")
 
         except queue.Empty:
             pass
