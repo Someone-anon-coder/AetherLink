@@ -9,7 +9,7 @@ import customtkinter
 from PIL import Image, ImageTk
 
 # <-- USER: Set this to the Tailscale IP of the Comms Hub machine
-COMMS_HUB_IP = "localhost"
+COMMS_HUB_IP = "100.69.186.67"
 COMMS_HUB_PORT = 8765
 
 class DashboardApp(customtkinter.CTk):
