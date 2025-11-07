@@ -1,79 +1,60 @@
-import sys
-sys.path.append('../')
-
-import socket
+import subprocess
 import time
-import cv2
-import struct
 from picamera2 import Picamera2
-from shared.protos import mission_data_pb2
+from picamera2.encoders import H264Encoder
+from picamera2.outputs import FileOutput
 
 # Configuration
-COMMS_HUB_IP = "100.73.152.43" # <-- USER: Set this to the Tailscale IP of the Comms Hub machine
-VIDEO_PORT = 9999
+COMMS_HUB_IP = "100.73.152.43"  # <-- USER: Set this to the Tailscale IP of the Comms Hub machine
+VIDEO_STREAM_PORT = 5600
 
 def main():
     """
-    Main function to capture video from Picamera2 and stream it over TCP.
+    Main function to capture video from Picamera2 and stream it over UDP using GStreamer.
     """
-    while True:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                print(f"Attempting to connect to {COMMS_HUB_IP}:{VIDEO_PORT}...")
-                sock.connect((COMMS_HUB_IP, VIDEO_PORT))
-                print("--> Connected to Comms Hub.")
+    print("Initializing Picamera2...")
+    picam2 = Picamera2()
+    video_config = picam2.create_video_configuration(main={"size": (1280, 720), "format": "RGB888"})
+    picam2.configure(video_config)
 
-                print("Initializing Picamera2...")
-                picam2 = Picamera2()
-                config = picam2.create_video_configuration(main={"size": (640, 480)})
-                picam2.configure(config)
-                picam2.start()
-                print("--> Picamera2 started. Streaming video...")
+    encoder = H264Encoder(bitrate=1000000)
 
-                frame_id = 0
-                while True:
-                    # Capture a frame as a NumPy array
-                    frame = picam2.capture_array()
+    print("Setting up GStreamer pipeline...")
+    gst_command = [
+        'gst-launch-1.0',
+        '-v',
+        'fdsrc',  # Use a file descriptor source
+        '!', 'h264parse',
+        '!', 'rtph264pay', 'config-interval=1', 'pt=96',
+        '!', 'udpsink', f'host={COMMS_HUB_IP}', f'port={VIDEO_STREAM_PORT}'
+    ]
 
-                    # Encode the image to JPEG format
-                    _, buffer = cv2.imencode('.jpg', frame)
+    try:
+        # Start the GStreamer pipeline
+        gst_process = subprocess.Popen(gst_command, stdin=subprocess.PIPE)
+        print(f"--> GStreamer process started. Streaming to {COMMS_HUB_IP}:{VIDEO_STREAM_PORT}")
 
-                    # Create a Protobuf message
-                    proto_frame = mission_data_pb2.VideoStreamFrame()
-                    proto_frame.frame_id = frame_id
-                    proto_frame.timestamp = int(time.time() * 1000)
-                    proto_frame.frame_data = buffer.tobytes()
+        # Pipe the encoded video output to the GStreamer process
+        output = FileOutput(gst_process.stdin)
+        picam2.start_recording(encoder, output)
 
-                    # Serialize the Protobuf message
-                    serialized_frame = proto_frame.SerializeToString()
-                    message_len = len(serialized_frame)
-                    header = struct.pack('!I', message_len)
+        print("--> Picamera2 recording started. Streaming video...")
 
-                    try:
-                        # Send the header and then the message
-                        sock.sendall(header)
-                        sock.sendall(serialized_frame)
+        # Keep the script running
+        while True:
+            time.sleep(1)
 
-                        if frame_id % 30 == 0:
-                            print(f"Sent frame {frame_id} ({len(serialized_frame)} bytes)")
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+    finally:
+        picam2.stop_recording()
+        if 'gst_process' in locals() and gst_process.poll() is None:
+            gst_process.terminate()
+            gst_process.wait()
+        print("Stream stopped.")
 
-                        frame_id += 1
-
-                    except (BrokenPipeError, ConnectionResetError):
-                        print("Connection lost. Reconnecting...")
-                        break  # Break inner loop to trigger reconnection
-                    except Exception as e:
-                        print(f"An error occurred during sending: {e}")
-                        time.sleep(1)
-
-
-        except ConnectionRefusedError:
-            print("Connection refused. Retrying in 5 seconds...")
-            time.sleep(5)
-        except Exception as e:
-            print(f"An unexpected error occurred: {e}")
-            print("Restarting script in 10 seconds...")
-            time.sleep(10)
 
 if __name__ == '__main__':
     main()
