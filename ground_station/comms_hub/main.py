@@ -115,8 +115,6 @@ class UdpProtocol(asyncio.DatagramProtocol):
         """
         This method is called automatically by asyncio whenever a UDP packet is received.
         """
-        parsed_message = None
-        
         if self.data_type == 'telemetry':
             try:
                 telemetry = Telemetry()
@@ -129,54 +127,15 @@ class UdpProtocol(asyncio.DatagramProtocol):
                     "relative_altitude_m": telemetry.relative_altitude_m,
                     "battery_voltage": telemetry.battery_voltage
                 }
+                json_message = json.dumps(parsed_message)
+                # Prepend telemetry header byte (0x01) and broadcast
+                asyncio.create_task(broadcast(b'\x01' + json_message.encode('utf-8')))
             except DecodeError:
                 print(f"Could not decode Telemetry from {addr}")
-        
-        if parsed_message:
-            json_message = json.dumps(parsed_message)
-            asyncio.create_task(broadcast(json_message))
 
-# --- TCP Video Logic ---
-async def handle_video_client(reader, writer):
-    """
-    Handles a single TCP client connection for video data.
-    """
-    addr = writer.get_extra_info('peername')
-    print(f"Video client connected: {addr}")
-    try:
-        while True:
-            # 1. Read the 4-byte header to get the message length
-            header = await reader.readexactly(4)
-            message_len = struct.unpack('!I', header)[0]
-
-            # 2. Read the full protobuf message
-            data = await reader.readexactly(message_len)
-
-            # 3. Parse, convert to JSON, and broadcast
-            try:
-                frame = VideoStreamFrame()
-                frame.ParseFromString(data)
-                frame_data_b64 = base64.b64encode(frame.frame_data).decode('utf-8')
-                parsed_message = {
-                    "type": "video_frame",
-                    "timestamp": frame.timestamp,
-                    "frame_id": frame.frame_id,
-                    "frame_data_b64": frame_data_b64
-                }
-                json_message = json.dumps(parsed_message)
-                asyncio.create_task(broadcast(json_message))
-            except DecodeError:
-                print(f"Could not decode VideoStreamFrame from {addr}")
-
-    except asyncio.IncompleteReadError:
-        print(f"Video client {addr} disconnected (incomplete read).")
-    except ConnectionResetError:
-        print(f"Video client {addr} connection reset.")
-    finally:
-        print(f"Closing connection for video client {addr}")
-        writer.close()
-        await writer.wait_closed()
-
+        elif self.data_type == 'video':
+            # Prepend video header byte (0x02) and broadcast raw data
+            asyncio.create_task(broadcast(b'\x02' + data))
 
 async def main():
     """
@@ -184,12 +143,11 @@ async def main():
     """
     loop = asyncio.get_running_loop()
 
-    # Start the TCP server for Video
-    video_server = await asyncio.start_server(
-        handle_video_client, '0.0.0.0', VIDEO_UDP_PORT
+    # Start the UDP listener for Video on the GStreamer port
+    video_transport, _ = await loop.create_datagram_endpoint(
+        lambda: UdpProtocol(data_type='video'),
+        local_addr=("0.0.0.0", 5600)  # New GStreamer port
     )
-    video_addr = video_server.sockets[0].getsockname()
-    print(f"TCP server for video started on {video_addr[0]}:{video_addr[1]}")
 
     # Start the UDP listener for Telemetry
     telemetry_transport, _ = await loop.create_datagram_endpoint(
@@ -206,7 +164,7 @@ async def main():
         await asyncio.Future()
     finally:
         websocket_server.close()
-        video_server.close()
+        video_transport.close()
         telemetry_transport.close()
 
 
