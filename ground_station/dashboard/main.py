@@ -90,12 +90,19 @@ class DashboardApp(customtkinter.CTk):
         print("Connection event received, starting video loop.")
 
         pipeline = (
-            "udpsrc port=5602 ! application/x-rtp, encoding-name=H264, payload=96 ! "
+            "udpsrc address=127.0.0.1 port=5602 ! application/x-rtp, encoding-name=H264, payload=96 ! "
             "rtph264depay ! decodebin ! videoconvert ! appsink"
         )
         cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
         if not cap.isOpened():
-            print("Error: Could not open video stream.")
+            print("="*50)
+            print("FATAL: Dashboard could not open GStreamer video stream.")
+            print("This is likely a GStreamer or pipeline configuration issue.")
+            print("TROUBLESHOOTING: Run this script with GStreamer's debug logs enabled:")
+            print(" $ export GST_DEBUG=3")
+            print(" $ python3 main.py")
+            print("Then, inspect the logs for errors from 'udpsrc'.")
+            print("="*50)
             return
 
         loop = asyncio.get_running_loop()
