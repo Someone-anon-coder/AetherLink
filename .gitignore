@@ -1,0 +1,12 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# IDE folders
+.idea/
+.vscode/
+
+# Log files
+*.json
+*.mp4
