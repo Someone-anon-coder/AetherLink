@@ -43,7 +43,7 @@ class DashboardApp(customtkinter.CTk):
         self.alt_label.pack(padx=10, pady=5)
         self.battery_label = customtkinter.CTkLabel(self.telemetry_frame, text="Battery: N/A")
         self.battery_label.pack(padx=10, pady=5)
-
+        
         self.mission_log = customtkinter.CTkTextbox(self.data_frame)
         self.mission_log.grid(row=2, column=0, padx=10, pady=10, sticky="nsew")
         self.mission_log.insert("0.0", "--- Mission Log ---\n")
@@ -94,7 +94,7 @@ class DashboardApp(customtkinter.CTk):
                 cv2.waitKey(10)
         cap.release()
         print("--- Video display thread stopped. ---")
-
+        
     async def websocket_client(self):
         uri = f"ws://{COMMS_HUB_IP}:{COMMS_HUB_PORT}"
         while not self.stop_event.is_set():
@@ -109,7 +109,7 @@ class DashboardApp(customtkinter.CTk):
             except Exception as e:
                 print(f"An unexpected error occurred: {e}")
                 await asyncio.sleep(5)
-
+    
     def on_closing(self):
         print("--- Closing application ---")
         self.stop_event.set()
@@ -117,7 +117,7 @@ class DashboardApp(customtkinter.CTk):
 
     def start(self):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
-
+        
         # Start the video thread
         video_thread = threading.Thread(target=self.video_thread_func, daemon=True)
         video_thread.start()
