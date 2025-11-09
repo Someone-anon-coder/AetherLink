@@ -96,8 +96,11 @@ class UdpProtocol(asyncio.DatagramProtocol):
                 print(f"Could not decode Telemetry from {addr}")
         elif self.data_type == 'video':
             # Forward the raw UDP packet to both the AI Engine and Dashboard
-            self.transport.sendto(data, ('127.0.0.1', AI_ENGINE_VIDEO_PORT))
-            self.transport.sendto(data, ('127.0.0.1', DASHBOARD_VIDEO_PORT))
+            ai_engine_target = ('127.0.0.1', AI_ENGINE_VIDEO_PORT)
+            dashboard_target = ('127.0.0.1', DASHBOARD_VIDEO_PORT)
+            self.transport.sendto(data, ai_engine_target)
+            self.transport.sendto(data, dashboard_target)
+            print(f"DEBUG: Forwarded {len(data)} video bytes from {addr} -> AI Engine @ {ai_engine_target} and Dashboard @ {dashboard_target}")
 
 
 async def main():
