@@ -4,7 +4,6 @@ import json
 from ultralytics import YOLO
 import cv2
 import numpy as np
-import base64
 from enum import Enum
 from haversine import haversine, Unit
 import time
@@ -219,6 +218,26 @@ async def broadcast_sender(websocket, queue):
         finally:
             queue.task_done()
 
+async def video_capture_task(port, queue):
+    """
+    Connects to the UDP video stream and puts frames into a queue.
+    """
+    pipeline = (
+        f"udpsrc port={port} ! "
+        "application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96 ! "
+        "rtph264depay ! decodebin ! videoconvert ! appsink"
+    )
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+    if not cap.isOpened():
+        print("Error: Could not open video stream in AI Engine.")
+        return
+
+    while True:
+        ret, frame = cap.read()
+        if ret:
+            await queue.put(frame)
+        else:
+            await asyncio.sleep(0.01)
 
 async def run():
     """
@@ -228,26 +247,40 @@ async def run():
     uri = f"ws://{COMMS_HUB_IP}:{COMMS_HUB_PORT}"
     command_queue = asyncio.Queue()
     broadcast_queue = asyncio.Queue()
+    video_frame_queue = asyncio.Queue()
     mission_logic = MissionLogic(command_queue, broadcast_queue)
     start_time = time.time()
+    video_port = None
+    video_task = None
 
     async for websocket in websockets.connect(uri):
         try:
             print(f"--- Connected to Comms Hub at {uri} ---")
+
+            await websocket.send(json.dumps({"action": "subscribe", "stream": "video"}))
 
             # Start the sender tasks
             command_sender_task = asyncio.create_task(command_sender(websocket, command_queue))
             broadcast_sender_task = asyncio.create_task(broadcast_sender(websocket, broadcast_queue))
 
             # Run the message processing loop
-            async for message in websocket:
-                data = json.loads(message)
+            async def message_handler():
+                nonlocal video_port, video_task
+                async for message in websocket:
+                    data = json.loads(message)
+                    if data.get('status') == 'subscribed' and data.get('stream') == 'video':
+                        video_port = data.get('port')
+                        if video_task:
+                            video_task.cancel()
+                        video_task = asyncio.create_task(video_capture_task(video_port, video_frame_queue))
+                        print(f"AI Engine received video port: {video_port}")
+                    else:
+                        await mission_logic.process_packet(data)
 
-                if data.get('type') == 'video_frame':
-                    frame_bytes = base64.b64decode(data['frame_data_b64'])
-                    image_np = np.frombuffer(frame_bytes, np.uint8)
-                    image = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
-                    results = model(image, verbose=False)
+            async def video_processing_loop():
+                while True:
+                    frame = await video_frame_queue.get()
+                    results = model(frame, verbose=False)
                     result = results[0]
 
                     detections = []
@@ -256,20 +289,25 @@ async def run():
                             class_id = int(box.cls[0])
                             class_name = model.names[class_id]
                             detections.append({'class_name': class_name, 'box': box.xyxy[0].tolist()})
-                    data['detections'] = detections
+
+                    video_frame_packet = {'type': 'video_frame', 'detections': detections}
 
                     # --- Placeholder for disaster detection ---
                     if time.time() - start_time > 20 and not mission_logic.payload_dropped:
-                        if 'detections' not in data:
-                            data['detections'] = []
-                        data['detections'].append({'class_name': 'disaster_zone', 'box': []})
+                        video_frame_packet['detections'].append({'class_name': 'disaster_zone', 'box': []})
 
-                await mission_logic.process_packet(data)
+                    await mission_logic.process_packet(video_frame_packet)
 
-            # Once the message loop is broken, cancel the sender tasks
-            command_sender_task.cancel()
-            broadcast_sender_task.cancel()
-            await asyncio.gather(command_sender_task, broadcast_sender_task, return_exceptions=True)
+            handler_task = asyncio.create_task(message_handler())
+            processing_task = asyncio.create_task(video_processing_loop())
+
+            done, pending = await asyncio.wait(
+                [handler_task, processing_task, command_sender_task, broadcast_sender_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            for task in pending:
+                task.cancel()
 
         except websockets.ConnectionClosed:
             print("--- Connection to Comms Hub lost. Attempting to reconnect... ---")

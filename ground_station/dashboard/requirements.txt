@@ -1,3 +1,5 @@
 websockets
 customtkinter
 Pillow
+opencv-python
+numpy
