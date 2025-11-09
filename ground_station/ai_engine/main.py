@@ -79,7 +79,7 @@ class MissionLogic:
     async def process_packet(self, packet):
         if packet['type'] == 'telemetry':
             self.latest_telemetry = packet
-
+        
         handler = getattr(self, f'_handle_{self.current_state.name.lower()}_state', None)
         if handler:
             await handler(packet)
@@ -123,7 +123,7 @@ class MissionLogic:
             await self._set_state(MissionState.RESUMING_SURVEY)
         else:
             await self._set_state(MissionState.RETURNING_TO_LAUNCH)
-
+            
     async def _handle_resuming_survey_state(self, packet):
         resume_payload = {"latitude": self.resume_point.get('latitude'), "longitude": self.resume_point.get('longitude'), "altitude_m": self.resume_point.get('relative_altitude_m')}
         await self._send_command(SystemCommand.CommandType.GOTO_LOCATION, payload_data=resume_payload)
@@ -164,29 +164,29 @@ def video_processing_thread(mission_logic, model, stop_event):
 
     loop = asyncio.get_running_loop()
     print("--- Video processing thread started. ---")
-
+    
     while not stop_event.is_set():
         ret, frame = cap.read()
         if not ret:
             time.sleep(0.1)
             continue
-
+        
         results = model(frame, verbose=False)
         result = results[0]
         detections = []
-
+        
         for box in result.boxes:
             class_id = int(box.cls[0])
             class_name = model.names[class_id]
             detections.append({'class_name': class_name, 'box': box.xyxy[0].tolist()})
-
+            
             # Draw on frame for video log
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(frame, class_name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
+            
         out.write(frame)
-
+        
         packet = {'type': 'detections_result', 'detections': detections}
         asyncio.run_coroutine_threadsafe(mission_logic.process_packet(packet), loop)
 
@@ -229,7 +229,7 @@ async def run():
                 data = json.loads(message)
                 if data.get('type') in ['telemetry', 'mission_state', 'mission_log']:
                     await mission_logic.process_packet(data)
-
+        
         except websockets.ConnectionClosed:
             print("--- Connection to Comms Hub lost. Reconnecting... ---")
         finally:
@@ -239,7 +239,7 @@ async def run():
             command_task.cancel()
             broadcast_task.cancel()
             await asyncio.sleep(5)
-
+    
     flight_logger.close()
 
 if __name__ == "__main__":
