@@ -16,8 +16,9 @@ sys.path.insert(0, sys.path[0]+'/../..')
 from shared.protos.mission_data_pb2 import SystemCommand
 
 # --- CONFIGURATION ---
-COMMS_HUB_IP = "100.69.186.67"
+COMMS_HUB_IP = "127.0.0.1"  # Connect to the local Comms Hub relay
 COMMS_HUB_PORT = 8765
+GSTREAMER_PIPELINE = "udpsrc port=5601 ! application/x-rtp, encoding-name=H264, payload=96 ! rtph264depay ! decodebin ! videoconvert ! appsink"
 model = YOLO('best.pt')
 
 class MissionState(Enum):
@@ -141,19 +142,20 @@ class MissionLogic:
     def _is_survey_complete(self):
         return len(self.detected_objects) > 2
 
-def video_processing_thread(mission_logic, model, stop_event):
-    pipeline = ("udpsrc port=5601 ! application/x-rtp, encoding-name=H264, payload=96 ! rtph264depay ! decodebin ! videoconvert ! appsink")
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+def video_processing_thread(loop, mission_logic, model, stop_event):
+    cap = cv2.VideoCapture(GSTREAMER_PIPELINE, cv2.CAP_GSTREAMER)
     if not cap.isOpened():
-        print("Error: Could not open video stream.")
+        print("Error: Could not open video stream from GStreamer pipeline.")
         return
-    loop = asyncio.get_running_loop()
-    start_time = time.time()
+
+    print("--> Video processing thread started successfully.")
     while not stop_event.is_set():
         ret, frame = cap.read()
         if not ret:
             print("Video stream ended or failed.")
-            break
+            time.sleep(1)
+            continue
+
         results = model(frame, verbose=False)
         result = results[0]
         detections = []
@@ -162,12 +164,12 @@ def video_processing_thread(mission_logic, model, stop_event):
                 class_id = int(box.cls[0])
                 class_name = model.names[class_id]
                 detections.append({'class_name': class_name, 'box': box.xyxy[0].tolist()})
-        if time.time() - start_time > 20 and not mission_logic.payload_dropped:
-             detections.append({'class_name': 'disaster_zone', 'box': []})
+                print(f"DETECTED: {class_name}")
+
         packet = {'type': 'detections_result', 'detections': detections}
         asyncio.run_coroutine_threadsafe(mission_logic.process_packet(packet), loop)
 
-    print("--- Video processing thread loop finished. ---")
+    print("--- Video processing thread has shut down. ---")
     cap.release()
 
 async def command_sender(websocket, queue):
@@ -196,41 +198,44 @@ async def run():
     broadcast_queue = asyncio.Queue()
     mission_logic = MissionLogic(command_queue, broadcast_queue)
 
-    async for websocket in websockets.connect(uri):
-        video_stop_event = threading.Event()
-        video_thread_task = None
+    while True:
         try:
-            print(f"--- Connected to Comms Hub at {uri} ---")
+            async with websockets.connect(uri) as websocket:
+                print(f"--- Connected to Comms Hub at {uri} ---")
+                stop_event = threading.Event()
+                loop = asyncio.get_running_loop()
 
-            # Start the video processing thread now that we are connected
-            loop = asyncio.get_running_loop()
-            video_thread_func = functools.partial(video_processing_thread, mission_logic, model, video_stop_event)
-            video_thread_task = loop.run_in_executor(None, video_thread_func)
+                # Start the video processing in a separate thread
+                video_thread_func = functools.partial(video_processing_thread, loop, mission_logic, model, stop_event)
+                video_future = loop.run_in_executor(None, video_thread_func)
 
-            command_sender_task = asyncio.create_task(command_sender(websocket, command_queue))
-            broadcast_sender_task = asyncio.create_task(broadcast_sender(websocket, broadcast_queue))
+                command_sender_task = asyncio.create_task(command_sender(websocket, command_queue))
+                broadcast_sender_task = asyncio.create_task(broadcast_sender(websocket, broadcast_queue))
 
-            async for message in websocket:
-                data = json.loads(message)
-                if data.get('type') in ['telemetry', 'mission_state', 'mission_log']:
-                    await mission_logic.process_packet(data)
+                # This loop now ONLY processes telemetry from the Comms Hub
+                async for message in websocket:
+                    data = json.loads(message)
+                    if data.get('type') == 'telemetry':
+                        await mission_logic.process_packet(data)
 
-            # Clean up tasks on graceful disconnect
-            command_sender_task.cancel()
-            broadcast_sender_task.cancel()
-            await asyncio.gather(command_sender_task, broadcast_sender_task, return_exceptions=True)
+                # Cancel tasks on graceful disconnect
+                command_sender_task.cancel()
+                broadcast_sender_task.cancel()
+                await asyncio.gather(command_sender_task, broadcast_sender_task, return_exceptions=True)
 
-        except websockets.ConnectionClosed:
-            print("--- Connection to Comms Hub lost. Attempting to reconnect... ---")
+        except (websockets.ConnectionClosed, ConnectionRefusedError) as e:
+            print(f"Connection lost or refused: {e}. Reconnecting in 5 seconds...")
         except Exception as e:
-            print(f"An error occurred: {e}")
+            print(f"An unexpected error occurred: {e}")
         finally:
-            print("--- Stopping video processing thread. ---")
-            video_stop_event.set()
-            if video_thread_task:
-                # Wait briefly for the thread to finish
-                await asyncio.sleep(1)
-            await asyncio.sleep(5) # Wait before reconnecting
+            if 'stop_event' in locals():
+                stop_event.set()
+            if 'video_future' in locals():
+                await video_future
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        print("\n--> AI Engine shutting down.")
