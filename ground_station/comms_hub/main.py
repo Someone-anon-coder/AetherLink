@@ -16,7 +16,8 @@ from shared.protos.mission_data_pb2 import Telemetry, SystemCommand
 VIDEO_PORT = 9999
 TELEMETRY_UDP_PORT = 9998
 COMMAND_PORT = 9997
-CLIENT_VIDEO_PORT = 5600  # Port for local UDP relay
+AI_ENGINE_VIDEO_PORT = 5601
+DASHBOARD_VIDEO_PORT = 5602
 WEBSOCKET_LISTEN_IP = "0.0.0.0"
 WEBSOCKET_LISTEN_PORT = 8765
 
@@ -94,8 +95,9 @@ class UdpProtocol(asyncio.DatagramProtocol):
             except DecodeError:
                 print(f"Could not decode Telemetry from {addr}")
         elif self.data_type == 'video':
-            # Simply forward the raw UDP packet to the local client port
-            self.transport.sendto(data, ('127.0.0.1', CLIENT_VIDEO_PORT))
+            # Forward the raw UDP packet to both the AI Engine and Dashboard
+            self.transport.sendto(data, ('127.0.0.1', AI_ENGINE_VIDEO_PORT))
+            self.transport.sendto(data, ('127.0.0.1', DASHBOARD_VIDEO_PORT))
 
 
 async def main():
