@@ -15,7 +15,7 @@ import socket
 # This allows us to import from the 'shared' directory
 sys.path.insert(0, sys.path[0]+'/../..')
 
-from shared.protos.mission_data_pb2 import Telemetry, VideoStreamFrame, SystemCommand
+from shared.protos.mission_data_pb2 import Telemetry, SystemCommand
 
 # --- CONFIGURATION ---
 VIDEO_UDP_PORT = 9999
@@ -32,6 +32,11 @@ CONNECTED_CLIENTS = set()
 # A UDP socket for sending commands, created once at startup
 COMMAND_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+
+class Hub:
+    """A simple class to hold the shared state."""
+    def __init__(self):
+        self.VIDEO_SUBSCRIBER_ADDR = None
 
 # --- WebSocket Logic ---
 async def handler(websocket, path=None):
@@ -101,8 +106,9 @@ class UdpProtocol(asyncio.DatagramProtocol):
     """
     The asyncio protocol for handling incoming UDP packets.
     """
-    def __init__(self, data_type):
+    def __init__(self, data_type, hub=None):
         self.data_type = data_type
+        self.hub = hub
         self.transport = None
         super().__init__()
 
@@ -115,9 +121,8 @@ class UdpProtocol(asyncio.DatagramProtocol):
         """
         This method is called automatically by asyncio whenever a UDP packet is received.
         """
-        parsed_message = None
-        
         if self.data_type == 'telemetry':
+            parsed_message = None
             try:
                 telemetry = Telemetry()
                 telemetry.ParseFromString(data)
@@ -129,53 +134,18 @@ class UdpProtocol(asyncio.DatagramProtocol):
                     "relative_altitude_m": telemetry.relative_altitude_m,
                     "battery_voltage": telemetry.battery_voltage
                 }
+                if parsed_message:
+                    json_message = json.dumps(parsed_message)
+                    asyncio.create_task(broadcast(json_message))
             except DecodeError:
                 print(f"Could not decode Telemetry from {addr}")
         
-        if parsed_message:
-            json_message = json.dumps(parsed_message)
-            asyncio.create_task(broadcast(json_message))
-
-# --- TCP Video Logic ---
-async def handle_video_client(reader, writer):
-    """
-    Handles a single TCP client connection for video data.
-    """
-    addr = writer.get_extra_info('peername')
-    print(f"Video client connected: {addr}")
-    try:
-        while True:
-            # 1. Read the 4-byte header to get the message length
-            header = await reader.readexactly(4)
-            message_len = struct.unpack('!I', header)[0]
-
-            # 2. Read the full protobuf message
-            data = await reader.readexactly(message_len)
-
-            # 3. Parse, convert to JSON, and broadcast
-            try:
-                frame = VideoStreamFrame()
-                frame.ParseFromString(data)
-                frame_data_b64 = base64.b64encode(frame.frame_data).decode('utf-8')
-                parsed_message = {
-                    "type": "video_frame",
-                    "timestamp": frame.timestamp,
-                    "frame_id": frame.frame_id,
-                    "frame_data_b64": frame_data_b64
-                }
-                json_message = json.dumps(parsed_message)
-                asyncio.create_task(broadcast(json_message))
-            except DecodeError:
-                print(f"Could not decode VideoStreamFrame from {addr}")
-
-    except asyncio.IncompleteReadError:
-        print(f"Video client {addr} disconnected (incomplete read).")
-    except ConnectionResetError:
-        print(f"Video client {addr} connection reset.")
-    finally:
-        print(f"Closing connection for video client {addr}")
-        writer.close()
-        await writer.wait_closed()
+        elif self.data_type == 'video':
+            if self.hub.VIDEO_SUBSCRIBER_ADDR is None:
+                self.hub.VIDEO_SUBSCRIBER_ADDR = addr
+                print(f"Registered dashboard at {addr} for video relay.")
+            else:
+                self.transport.sendto(data, self.hub.VIDEO_SUBSCRIBER_ADDR)
 
 
 async def main():
@@ -183,13 +153,13 @@ async def main():
     Main entry point. Starts the UDP listener and WebSocket server.
     """
     loop = asyncio.get_running_loop()
+    hub = Hub()
 
-    # Start the TCP server for Video
-    video_server = await asyncio.start_server(
-        handle_video_client, '0.0.0.0', VIDEO_UDP_PORT
+    # Start the UDP listener for Video
+    video_transport, _ = await loop.create_datagram_endpoint(
+        lambda: UdpProtocol('video', hub),
+        local_addr=("0.0.0.0", VIDEO_UDP_PORT)
     )
-    video_addr = video_server.sockets[0].getsockname()
-    print(f"TCP server for video started on {video_addr[0]}:{video_addr[1]}")
 
     # Start the UDP listener for Telemetry
     telemetry_transport, _ = await loop.create_datagram_endpoint(
@@ -206,7 +176,7 @@ async def main():
         await asyncio.Future()
     finally:
         websocket_server.close()
-        video_server.close()
+        video_transport.close()
         telemetry_transport.close()
 
 

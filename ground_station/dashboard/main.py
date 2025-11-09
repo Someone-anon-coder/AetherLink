@@ -1,8 +1,8 @@
 import asyncio
-import base64
-import io
 import json
 import queue
+import socket
+import subprocess
 import threading
 import websockets
 import customtkinter
@@ -11,6 +11,9 @@ from PIL import Image, ImageTk
 # <-- USER: Set this to the Tailscale IP of the Comms Hub machine
 COMMS_HUB_IP = "100.69.186.67"
 COMMS_HUB_PORT = 8765
+VIDEO_PORT = 9999
+GSTREAMER_VIDEO_PORT = 5601
+
 
 class DashboardApp(customtkinter.CTk):
     def __init__(self):
@@ -25,7 +28,7 @@ class DashboardApp(customtkinter.CTk):
         self.grid_rowconfigure(0, weight=1)
 
         # Video Feed
-        self.video_label = customtkinter.CTkLabel(self, text="Waiting for video feed...")
+        self.video_label = customtkinter.CTkFrame(self, width=1280, height=720)
         self.video_label.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
         # Data Panels Frame
@@ -63,6 +66,7 @@ class DashboardApp(customtkinter.CTk):
         self.data_queue = queue.Queue()
         self.displayed_detections = set()
 
+        self.after(100, self.start_gstreamer)
 
     def update_gui(self):
         try:
@@ -73,12 +77,6 @@ class DashboardApp(customtkinter.CTk):
                 self.lon_label.configure(text=f"Lon: {data.get('longitude', 0):.6f}")
                 self.alt_label.configure(text=f"Alt: {data.get('relative_altitude_m', 0):.2f} m")
                 self.battery_label.configure(text=f"Battery: {data.get('battery_voltage', 0):.2f}%")
-
-            elif data.get('type') == 'video_frame':
-                image_data = base64.b64decode(data.get('frame_data_b64', ''))
-                image = Image.open(io.BytesIO(image_data))
-                ctk_image = customtkinter.CTkImage(light_image=image, dark_image=image, size=(640, 480))
-                self.video_label.configure(image=ctk_image, text="")
 
             elif data.get('type') == 'mission_state':
                 self.mission_state_label.configure(text=f"Mission State: {data.get('state', 'N/A')}")
@@ -94,6 +92,10 @@ class DashboardApp(customtkinter.CTk):
             self.after(100, self.update_gui)
 
     async def websocket_client(self):
+        # Register for video stream
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(b'register', (COMMS_HUB_IP, VIDEO_PORT))
+
         uri = f"ws://{COMMS_HUB_IP}:{COMMS_HUB_PORT}"
         while True:
             try:
@@ -110,6 +112,20 @@ class DashboardApp(customtkinter.CTk):
                 print(f"Failed to connect to Comms Hub: {e}. Retrying in 5 seconds...")
                 await asyncio.sleep(5)
 
+    def start_gstreamer(self):
+        def run_gstreamer(xid):
+            pipeline = (
+                f"gst-launch-1.0 udpsrc port={GSTREAMER_VIDEO_PORT} ! "
+                "application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96 ! "
+                "rtph264depay ! decodebin ! videoconvert ! "
+                f"ximagesink window-xid={xid}"
+            )
+            subprocess.Popen(pipeline, shell=True)
+
+        xid = self.video_label.winfo_id()
+        gstreamer_thread = threading.Thread(target=run_gstreamer, args=(xid,), daemon=True)
+        gstreamer_thread.start()
+
     def start(self):
         def run_asyncio_loop():
             asyncio.run(self.websocket_client())
@@ -119,6 +135,7 @@ class DashboardApp(customtkinter.CTk):
 
         self.update_gui()
         self.mainloop()
+
 
 if __name__ == "__main__":
     app = DashboardApp()
