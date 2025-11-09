@@ -9,6 +9,7 @@ from haversine import haversine, Unit
 import time
 import sys
 import functools
+import threading
 
 # --- Add Path Modifier ---
 sys.path.insert(0, sys.path[0]+'/../..')
@@ -140,16 +141,18 @@ class MissionLogic:
     def _is_survey_complete(self):
         return len(self.detected_objects) > 2
 
-def video_processing_thread(mission_logic, model, loop):
-    pipeline = ("udpsrc port=5600 ! application/x-rtp, encoding-name=H264, payload=96 ! rtph264depay ! decodebin ! videoconvert ! appsink")
+def video_processing_thread(mission_logic, model, stop_event):
+    pipeline = ("udpsrc port=5601 ! application/x-rtp, encoding-name=H264, payload=96 ! rtph264depay ! decodebin ! videoconvert ! appsink")
     cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
     if not cap.isOpened():
         print("Error: Could not open video stream.")
         return
+    loop = asyncio.get_running_loop()
     start_time = time.time()
-    while True:
+    while not stop_event.is_set():
         ret, frame = cap.read()
         if not ret:
+            print("Video stream ended or failed.")
             break
         results = model(frame, verbose=False)
         result = results[0]
@@ -163,6 +166,8 @@ def video_processing_thread(mission_logic, model, loop):
              detections.append({'class_name': 'disaster_zone', 'box': []})
         packet = {'type': 'detections_result', 'detections': detections}
         asyncio.run_coroutine_threadsafe(mission_logic.process_packet(packet), loop)
+
+    print("--- Video processing thread loop finished. ---")
     cap.release()
 
 async def command_sender(websocket, queue):
@@ -190,27 +195,42 @@ async def run():
     command_queue = asyncio.Queue()
     broadcast_queue = asyncio.Queue()
     mission_logic = MissionLogic(command_queue, broadcast_queue)
-    loop = asyncio.get_event_loop()
-    video_thread_func = functools.partial(video_processing_thread, mission_logic, model, loop)
-    loop.run_in_executor(None, video_thread_func)
+
     async for websocket in websockets.connect(uri):
+        video_stop_event = threading.Event()
+        video_thread_task = None
         try:
             print(f"--- Connected to Comms Hub at {uri} ---")
+
+            # Start the video processing thread now that we are connected
+            loop = asyncio.get_running_loop()
+            video_thread_func = functools.partial(video_processing_thread, mission_logic, model, video_stop_event)
+            video_thread_task = loop.run_in_executor(None, video_thread_func)
+
             command_sender_task = asyncio.create_task(command_sender(websocket, command_queue))
             broadcast_sender_task = asyncio.create_task(broadcast_sender(websocket, broadcast_queue))
+
             async for message in websocket:
                 data = json.loads(message)
                 if data.get('type') in ['telemetry', 'mission_state', 'mission_log']:
                     await mission_logic.process_packet(data)
+
+            # Clean up tasks on graceful disconnect
             command_sender_task.cancel()
             broadcast_sender_task.cancel()
             await asyncio.gather(command_sender_task, broadcast_sender_task, return_exceptions=True)
+
         except websockets.ConnectionClosed:
             print("--- Connection to Comms Hub lost. Attempting to reconnect... ---")
-            await asyncio.sleep(5)
         except Exception as e:
             print(f"An error occurred: {e}")
-            await asyncio.sleep(5)
+        finally:
+            print("--- Stopping video processing thread. ---")
+            video_stop_event.set()
+            if video_thread_task:
+                # Wait briefly for the thread to finish
+                await asyncio.sleep(1)
+            await asyncio.sleep(5) # Wait before reconnecting
 
 if __name__ == "__main__":
     asyncio.run(run())

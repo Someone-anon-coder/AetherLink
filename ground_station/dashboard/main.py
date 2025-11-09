@@ -12,27 +12,6 @@ import numpy as np
 COMMS_HUB_IP = "100.69.186.67"
 COMMS_HUB_PORT = 8765
 
-def video_update_thread(app):
-    """
-    Handles capturing the GStreamer feed and putting frames on the queue.
-    """
-    pipeline = (
-        "udpsrc port=5600 ! application/x-rtp, encoding-name=H264, payload=96 ! "
-        "rtph264depay ! decodebin ! videoconvert ! appsink"
-    )
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-    if not cap.isOpened():
-        print("Error: Could not open video stream.")
-        return
-
-    while True:
-        ret, frame = cap.read()
-        if ret:
-            # Convert BGR (OpenCV) to RGB (Pillow)
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(rgb_frame)
-            app.data_queue.put({'type': 'video_image', 'image': pil_image})
-
 class DashboardApp(customtkinter.CTk):
     def __init__(self):
         super().__init__()
@@ -64,6 +43,7 @@ class DashboardApp(customtkinter.CTk):
         self.mission_log.insert("0.0", "--- Mission Log ---\n")
         self.mission_log.configure(state="disabled")
         self.data_queue = queue.Queue()
+        self.comms_hub_connected = asyncio.Event()
 
     def update_gui(self):
         try:
@@ -93,20 +73,63 @@ class DashboardApp(customtkinter.CTk):
             try:
                 async for websocket in websockets.connect(uri):
                     print("Dashboard connected to Comms Hub.")
+                    self.comms_hub_connected.set()
                     try:
                         async for message in websocket:
                             self.data_queue.put(json.loads(message))
                     except websockets.ConnectionClosed:
                         print("Connection to Comms Hub closed. Retrying...")
+                        self.comms_hub_connected.clear()
             except Exception as e:
                 print(f"Failed to connect: {e}. Retrying...")
+                self.comms_hub_connected.clear()
                 await asyncio.sleep(5)
 
+    async def video_update_loop(self):
+        await self.comms_hub_connected.wait()
+        print("Connection event received, starting video loop.")
+
+        pipeline = (
+            "udpsrc port=5602 ! application/x-rtp, encoding-name=H264, payload=96 ! "
+            "rtph264depay ! decodebin ! videoconvert ! appsink"
+        )
+        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        if not cap.isOpened():
+            print("Error: Could not open video stream.")
+            return
+
+        loop = asyncio.get_running_loop()
+        while True:
+            if not self.comms_hub_connected.is_set():
+                print("Connection lost. Pausing video stream.")
+                cap.release()
+                await self.comms_hub_connected.wait()
+                print("Reconnected. Restarting video stream.")
+                cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+
+            ret, frame = await loop.run_in_executor(None, cap.read)
+            if ret:
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(rgb_frame)
+                self.data_queue.put({'type': 'video_image', 'image': pil_image})
+            else:
+                # Small sleep to prevent a tight loop if cap.read() fails continuously
+                await asyncio.sleep(0.1)
+
     def start(self):
-        network_thread = threading.Thread(target=lambda: asyncio.run(self.websocket_client()), daemon=True)
+        def _run_async_loop():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(
+                asyncio.gather(
+                    self.websocket_client(),
+                    self.video_update_loop()
+                )
+            )
+
+        network_thread = threading.Thread(target=_run_async_loop, daemon=True)
         network_thread.start()
-        video_thread = threading.Thread(target=video_update_thread, args=(self,), daemon=True)
-        video_thread.start()
+
         self.update_gui()
         self.mainloop()
 
