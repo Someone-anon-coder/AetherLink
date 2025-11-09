@@ -44,11 +44,11 @@ async def handler(websocket, path=None):
                     if not ONBOARD_SYSTEM_IP:
                         print("WARN: No onboard system IP learned yet. Cannot send command.")
                         continue
-
+                    
                     command_name_str = data.get("command_name")
                     payload_dict = data.get("payload")
                     command_type = SystemCommand.CommandType.Value(command_name_str)
-
+                    
                     cmd_proto = SystemCommand()
                     cmd_proto.command_type = command_type
 
@@ -60,9 +60,9 @@ async def handler(websocket, path=None):
                         elif command_type == SystemCommand.CommandType.SET_SERVO:
                             cmd_proto.servo.servo_id = payload_dict['servo_id']
                             cmd_proto.servo.pwm_value = payload_dict['pwm_value']
-
+                    
                     serialized_cmd = cmd_proto.SerializeToString()
-
+                    
                     # This part needs to be async; we'll create a temporary socket
                     loop = asyncio.get_running_loop()
                     transport, _ = await loop.create_datagram_endpoint(
@@ -71,7 +71,7 @@ async def handler(websocket, path=None):
                     )
                     transport.sendto(serialized_cmd)
                     transport.close()
-
+                    
                     print(f"RELAY: Relaying command {command_name_str} to {ONBOARD_SYSTEM_IP}:{COMMAND_PORT}")
 
             except (json.JSONDecodeError, KeyError, ValueError) as e:
@@ -100,12 +100,12 @@ class UdpProtocol(asyncio.DatagramProtocol):
 
     def datagram_received(self, data, addr):
         global ONBOARD_SYSTEM_IP
-
+        
         if self.data_type == 'telemetry':
             if ONBOARD_SYSTEM_IP is None:
                 ONBOARD_SYSTEM_IP = addr[0]
                 print(f"INFO: Onboard system IP learned as {ONBOARD_SYSTEM_IP}")
-
+            
             try:
                 telemetry = Telemetry()
                 telemetry.ParseFromString(data)
@@ -127,7 +127,7 @@ class UdpProtocol(asyncio.DatagramProtocol):
             dashboard_target = (DASHBOARD_IP, DASHBOARD_VIDEO_PORT)
             self.transport.sendto(data, ai_engine_target)
             self.transport.sendto(data, dashboard_target)
-
+            
             self.video_packet_count += 1
             if self.video_packet_count % 100 == 0:
                 print(f"DEBUG: Forwarded 100 video packets. Total: {self.video_packet_count}")
