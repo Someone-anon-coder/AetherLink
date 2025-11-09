@@ -7,10 +7,6 @@ import threading
 import websockets
 import customtkinter
 from PIL import Image, ImageTk
-import socket
-import cv2
-import numpy as np
-import time
 
 # <-- USER: Set this to the Tailscale IP of the Comms Hub machine
 COMMS_HUB_IP = "100.69.186.67"
@@ -78,6 +74,12 @@ class DashboardApp(customtkinter.CTk):
                 self.alt_label.configure(text=f"Alt: {data.get('relative_altitude_m', 0):.2f} m")
                 self.battery_label.configure(text=f"Battery: {data.get('battery_voltage', 0):.2f}%")
 
+            elif data.get('type') == 'video_frame':
+                image_data = base64.b64decode(data.get('frame_data_b64', ''))
+                image = Image.open(io.BytesIO(image_data))
+                ctk_image = customtkinter.CTkImage(light_image=image, dark_image=image, size=(640, 480))
+                self.video_label.configure(image=ctk_image, text="")
+
             elif data.get('type') == 'mission_state':
                 self.mission_state_label.configure(text=f"Mission State: {data.get('state', 'N/A')}")
 
@@ -91,68 +93,16 @@ class DashboardApp(customtkinter.CTk):
         finally:
             self.after(100, self.update_gui)
 
-    def video_processing_thread(self):
-        # GStreamer pipeline for receiving H.264 video over UDP
-        pipeline = (
-            "udpsrc port=5601 ! "
-            "application/x-rtp, encoding-name=H264, payload=96 ! "
-            "rtph264depay ! "
-            "decodebin ! "
-            "videoconvert ! "
-            "appsink"
-        )
-
-        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-
-        if not cap.isOpened():
-            print("Failed to open video capture pipeline.")
-            return
-
-        while True:
-            ret, frame = cap.read()
-            if ret:
-                # Convert the BGR frame from OpenCV to RGB for Pillow
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                # Create a Pillow Image object
-                pil_image = Image.fromarray(rgb_frame)
-
-                # Create a CTkImage object
-                ctk_image = customtkinter.CTkImage(light_image=pil_image, dark_image=pil_image, size=(640, 480))
-
-                # Update the GUI. CTk calls are generally thread-safe for simple config changes.
-                self.video_label.configure(image=ctk_image, text="")
-            else:
-                # Add a small delay to prevent a tight loop on read failure
-                time.sleep(0.01)
-
-
     async def websocket_client(self):
         uri = f"ws://{COMMS_HUB_IP}:{COMMS_HUB_PORT}"
-        # Create a UDP socket for the local relay
-        local_udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        local_address = ("127.0.0.1", 5601)
-
         while True:
             try:
                 async for websocket in websockets.connect(uri):
                     print("Dashboard connected to Comms Hub.")
                     try:
                         async for message in websocket:
-                            header = message[0]
-                            payload = message[1:]
-
-                            if header == 0x01: # Telemetry
-                                try:
-                                    data = json.loads(payload.decode('utf-8'))
-                                    self.data_queue.put(data)
-                                except (json.JSONDecodeError, UnicodeDecodeError):
-                                    print("Failed to decode telemetry JSON.")
-
-                            elif header == 0x02: # Video
-                                # Relay the raw video packet to the local GStreamer instance
-                                local_udp_socket.sendto(payload, local_address)
-
+                            data = json.loads(message)
+                            self.data_queue.put(data)
                     except websockets.ConnectionClosed:
                         print("Connection to Comms Hub closed. Retrying...")
                         continue
@@ -161,18 +111,12 @@ class DashboardApp(customtkinter.CTk):
                 await asyncio.sleep(5)
 
     def start(self):
-        # --- Start WebSocket Network Thread ---
         def run_asyncio_loop():
             asyncio.run(self.websocket_client())
 
         network_thread = threading.Thread(target=run_asyncio_loop, daemon=True)
         network_thread.start()
 
-        # --- Start Video Processing Thread ---
-        video_thread = threading.Thread(target=self.video_processing_thread, daemon=True)
-        video_thread.start()
-
-        # --- Start GUI ---
         self.update_gui()
         self.mainloop()
 
