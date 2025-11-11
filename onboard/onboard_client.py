@@ -6,17 +6,19 @@ import base64
 import time
 from picamera2 import Picamera2
 from concurrent.futures import ThreadPoolExecutor
+import socket
 
 # --- CONFIGURATION ---
-GCS_IP = "100.x.x.x"  # <-- USER: Set this to the Tailscale IP of the GCS laptop
+GCS_IP = "100.69.186.67"  # <-- USER: Set this to the Tailscale IP of the GCS laptop
 GCS_PORT = 8765
+GCS_VIDEO_PORT = 9999
 VIDEO_RESOLUTION = (640, 480)
 VIDEO_FRAMERATE = 30
 JPEG_QUALITY = 80
 
 executor = ThreadPoolExecutor(max_workers=1)
 
-def video_producer_sync(websocket, loop):
+def video_producer_sync(udp_socket, gcs_address):
     """
     Synchronous function for video capture. Runs in a separate thread.
     """
@@ -31,18 +33,11 @@ def video_producer_sync(websocket, loop):
     while True:
         frame = picam2.capture_array()
         _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-        encoded_frame = base64.b64encode(buffer).decode('utf-8')
-
-        message = json.dumps({
-            'type': 'video',
-            'payload': encoded_frame
-        })
-
-        future = asyncio.run_coroutine_threadsafe(websocket.send(message), loop)
+        
         try:
-            future.result(timeout=1)
+            udp_socket.sendto(buffer, gcs_address)
         except Exception as e:
-            print(f"WARN: Could not send video frame: {e}")
+            print(f"WARN: Could not send video frame via UDP: {e}")
             break
 
         time.sleep(1 / VIDEO_FRAMERATE)
@@ -84,6 +79,9 @@ async def run():
     """
     uri = f"ws://{GCS_IP}:{GCS_PORT}"
     loop = asyncio.get_running_loop()
+    
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    gcs_video_address = (GCS_IP, GCS_VIDEO_PORT)
 
     while True:
         try:
@@ -91,7 +89,7 @@ async def run():
                 print(f"INFO: Connected to GCS at {uri}")
 
                 video_task = loop.run_in_executor(
-                    executor, video_producer_sync, websocket, loop
+                    executor, video_producer_sync, udp_socket, gcs_video_address
                 )
                 telemetry_task = asyncio.create_task(telemetry_producer(websocket))
                 receiver_task = asyncio.create_task(receiver(websocket))
