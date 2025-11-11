@@ -10,46 +10,54 @@ from PIL import Image, ImageTk
 import threading
 import queue
 
-class DataProcessor:
-    def __init__(self):
-        self.model = YOLO('best.pt')
-        print("INFO: YOLO model loaded.")
+# --- CONFIGURATION ---
+GCS_WS_PORT = 8765
+GCS_VIDEO_UDP_PORT = 9999
+HOST = "0.0.0.0"
 
-    async def process_video_packet(self, video_payload):
+class VideoReceiverProtocol(asyncio.DatagramProtocol):
+    def __init__(self, video_queue):
+        super().__init__()
+        self.video_queue = video_queue
+
+    def datagram_received(self, data, addr):
+        """
+        Handles incoming UDP packets.
+        """
         try:
-            img_bytes = base64.b64decode(video_payload)
-            np_arr = np.frombuffer(img_bytes, np.uint8)
+            np_arr = np.frombuffer(data, np.uint8)
             image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-            if image is None:
-                print("WARN: Failed to decode image.")
-                return None, []
+            if image is not None:
+                self.video_queue.put_nowait(image)
+            else:
+                print("WARN: Failed to decode UDP video frame.")
 
-            results = self.model(image, verbose=False)
-
-            detections = []
-            for result in results:
-                for box in result.boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    confidence = float(box.conf[0])
-                    class_id = int(box.cls[0])
-                    class_name = self.model.names[class_id]
-                    detections.append({
-                        "class_name": class_name,
-                        "confidence": confidence,
-                        "box": [x1, y1, x2, y2]
-                    })
-
-            print(f"DEBUG: Processed video frame, found {len(detections)} detections.")
-            return image, detections
+        except queue.Full:
+            print("WARN: GUI video queue is full, dropping frame.")
         except Exception as e:
-            print(f"ERROR: Error processing video packet: {e}")
-            return None, []
+            print(f"ERROR: Could not process UDP packet: {e}")
+
+async def udp_video_receiver(video_queue):
+    """
+    Coroutine to set up and run the UDP server for video.
+    """
+    loop = asyncio.get_running_loop()
+    print(f"INFO: Starting UDP video receiver on {HOST}:{GCS_VIDEO_UDP_PORT}")
+
+    transport, protocol = await loop.create_datagram_endpoint(
+        lambda: VideoReceiverProtocol(video_queue),
+        local_addr=(HOST, GCS_VIDEO_UDP_PORT)
+    )
+
+    try:
+        await asyncio.Future()
+    finally:
+        transport.close()
 
 class GCSApp:
     def __init__(self):
-        self.data_processor = DataProcessor()
-        self.video_for_gui_queue = queue.Queue()
+        self.video_for_gui_queue = queue.Queue(maxsize=10) # Bounded queue
         self.telemetry_for_gui_queue = queue.Queue()
         self.detections_for_mission_logic_queue = asyncio.Queue()
         self.telemetry_for_mission_logic_queue = asyncio.Queue()
@@ -60,25 +68,17 @@ class GCSApp:
             async for message in websocket:
                 try:
                     data = json.loads(message)
-                    if 'type' in data:
-                        if data['type'] == 'video':
-                            payload = data.get('payload', '')
-                            print(f"DEBUG: Received VIDEO packet, payload size: {len(payload)} bytes")
-                            image, detections = await self.data_processor.process_video_packet(payload)
-                            if image is not None:
-                                self.video_for_gui_queue.put_nowait(image)
-                                await self.detections_for_mission_logic_queue.put(detections)
-                        elif data['type'] == 'telemetry':
-                            payload = data.get('payload')
-                            print(f"DEBUG: Received TELEMETRY packet: {payload}")
-                            self.telemetry_for_gui_queue.put_nowait(payload)
-                            await self.telemetry_for_mission_logic_queue.put(payload)
-                        else:
-                            print(f"WARN: Received unknown data type: {data['type']}")
+                    if data.get('type') == 'telemetry':
+                        payload = data.get('payload')
+                        # print(f"DEBUG: Received TELEMETRY packet: {payload}")
+                        self.telemetry_for_gui_queue.put_nowait(payload)
+                        await self.telemetry_for_mission_logic_queue.put(payload)
                     else:
-                        print(f"WARN: Received message without 'type' field: {data}")
+                        print(f"WARN: Received unknown message type on WebSocket: {data.get('type')}")
                 except json.JSONDecodeError:
                     print(f"WARN: Received non-JSON message: {message}")
+                except queue.Full:
+                    print("WARN: GUI telemetry queue is full.")
 
         except websockets.ConnectionClosed as e:
             print(f"INFO: Connection with {websocket.remote_address} closed: {e}")
@@ -86,19 +86,21 @@ class GCSApp:
             print(f"INFO: Onboard system {websocket.remote_address} disconnected.")
 
     async def start_server(self):
-        HOST = "0.0.0.0"
-        PORT = 8765
-        async with websockets.serve(self.websocket_handler, HOST, PORT):
-            print(f"INFO: GCS WebSocket server started on ws://{HOST}:{PORT}")
+        async with websockets.serve(self.websocket_handler, HOST, GCS_WS_PORT):
+            print(f"INFO: GCS WebSocket server started on ws://{HOST}:{GCS_WS_PORT}")
             await asyncio.Future()
 
 class Dashboard(customtkinter.CTk):
-    def __init__(self, video_queue, telemetry_queue):
+    def __init__(self, video_queue, telemetry_queue, detections_queue_async):
         super().__init__()
 
         self.video_queue = video_queue
         self.telemetry_queue = telemetry_queue
+        self.detections_queue_async = detections_queue_async
+        self.loop = asyncio.get_running_loop()
 
+        # Initialize DataProcessor here, so the model is in the GUI thread
+        self.data_processor = DataProcessor()
         self.title("AetherLink GCS")
         self.geometry("1280x720")
 
@@ -141,19 +143,27 @@ class Dashboard(customtkinter.CTk):
         # Update telemetry
         try:
             telemetry = self.telemetry_queue.get_nowait()
-            self.lat_label.configure(text=f"Lat: {telemetry.get('lat', 'N/A'):.6f}")
-            self.lon_label.configure(text=f"Lon: {telemetry.get('lon', 'N/A'):.6f}")
-            self.alt_label.configure(text=f"Alt: {telemetry.get('alt', 'N/A'):.2f} m")
-            self.v_ground_label.configure(text=f"V Gnd: {telemetry.get('v_ground', 'N/A'):.2f} m/s")
+            self.lat_label.configure(text=f"Lat: {telemetry.get('latitude', 'N/A'):.6f}")
+            self.lon_label.configure(text=f"Lon: {telemetry.get('longitude', 'N/A'):.6f}")
+            self.alt_label.configure(text=f"Alt: {telemetry.get('altitude', 'N/A'):.2f} m")
+            self.v_ground_label.configure(text=f"V Gnd: {telemetry.get('speed', 'N/A'):.2f} m/s")
             self.heading_label.configure(text=f"Heading: {telemetry.get('heading', 'N/A'):.2f}°")
         except queue.Empty:
             pass
 
-        # Update video
+        # Update video and run inference
         try:
             frame = self.video_queue.get_nowait()
             if frame is not None:
-                img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # Run inference
+                processed_frame, detections = self.data_processor.process_frame(frame)
+
+                # Send detections to mission logic
+                if detections:
+                    asyncio.run_coroutine_threadsafe(self.detections_queue_async.put(detections), self.loop)
+
+                # Display the frame
+                img = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(img)
                 ctk_image = customtkinter.CTkImage(light_image=img, dark_image=img, size=(960, 540))
                 self.video_label.configure(image=ctk_image, text="")
@@ -162,34 +172,66 @@ class Dashboard(customtkinter.CTk):
 
         self.after(33, self.update_widgets)
 
-def run_gui(video_queue, telemetry_queue):
-    app = Dashboard(video_queue, telemetry_queue)
-    app.mainloop()
+class DataProcessor:
+    def __init__(self):
+        self.model = YOLO('best.pt')
+        print("INFO: YOLO model loaded.")
 
-async def mission_logic_detections_consumer(app):
+    def process_frame(self, image):
+        # This is now a synchronous method
+        results = self.model(image, verbose=False)
+        detections = []
+
+        # Drawing boxes on the image
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                confidence = float(box.conf[0])
+                class_id = int(box.cls[0])
+                class_name = self.model.names[class_id]
+
+                detections.append({
+                    "class_name": class_name,
+                    "confidence": confidence,
+                    "box": [x1, y1, x2, y2]
+                })
+
+                # Draw the bounding box
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label = f"{class_name}: {confidence:.2f}"
+                cv2.putText(image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        return image, detections
+
+def run_gui(app):
+    gui = Dashboard(
+        app.video_for_gui_queue,
+        app.telemetry_for_gui_queue,
+        app.detections_for_mission_logic_queue
+    )
+    gui.mainloop()
+
+async def mission_logic_consumer(app):
     while True:
         detections = await app.detections_for_mission_logic_queue.get()
         print(f"MISSION_LOGIC: Received {len(detections)} detections.")
-
-async def mission_logic_telemetry_consumer(app):
-    while True:
-        telemetry = await app.telemetry_for_mission_logic_queue.get()
-        print(f"MISSION_LOGIC: Received telemetry: {telemetry}")
+        # We can also consume telemetry here if needed:
+        # telemetry = await app.telemetry_for_mission_logic_queue.get()
 
 async def main():
     app = GCSApp()
 
     gui_thread = threading.Thread(
         target=run_gui,
-        args=(app.video_for_gui_queue, app.telemetry_for_gui_queue),
+        args=(app,),
         daemon=True
     )
     gui_thread.start()
 
     await asyncio.gather(
         app.start_server(),
-        mission_logic_detections_consumer(app),
-        mission_logic_telemetry_consumer(app)
+        udp_video_receiver(app.video_for_gui_queue),
+        mission_logic_consumer(app)
     )
 
 if __name__ == "__main__":
