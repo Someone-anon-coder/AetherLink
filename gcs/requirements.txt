@@ -1,1 +1,7 @@
 websockets
+ultralytics
+opencv-python
+numpy
+customtkinter
+Pillow
+haversine
