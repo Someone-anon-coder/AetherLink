@@ -15,6 +15,12 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 WEBSOCKET_PORT = 8765
 VIDEO_PORT = 9999
 
+# --- VIDEO RELAY CONFIGURATION ---
+RELAY_VIDEO_STREAM = True # Set to True to enable forwarding
+RELAY_TARGETS = [
+    ("100.x.x.y", 9999) # Example: Raspi with OLED screen
+]
+
 class Dashboard(customtkinter.CTk):
     """Main GUI application window."""
     def __init__(self, video_q, telemetry_q):
@@ -97,37 +103,42 @@ class Dashboard(customtkinter.CTk):
 
     def update_widgets(self):
         """Periodically updates GUI with data from queues."""
-        # --- Update Telemetry ---
         try:
-            telemetry = self.telemetry_queue.get_nowait()
-            self.telemetry_labels["Lat:"].configure(text=f"Lat: {telemetry.get('latitude', 0):.6f}")
-            self.telemetry_labels["Lon:"].configure(text=f"Lon: {telemetry.get('longitude', 0):.6f}")
-            self.telemetry_labels["Alt:"].configure(text=f"Alt: {telemetry.get('altitude', 0):.2f} m")
-            self.telemetry_labels["Speed:"].configure(text=f"Speed: {telemetry.get('speed', 0):.2f} m/s")
-            self.telemetry_labels["Heading:"].configure(text=f"Heading: {telemetry.get('heading', 0):.1f}°")
-            self.telemetry_labels["Battery:"].configure(text=f"Battery: {telemetry.get('battery_percentage', 0):.1f}%")
-            self.telemetry_labels["Voltage:"].configure(text=f"Voltage: {telemetry.get('voltage', 0):.2f}V")
+            data = self.telemetry_queue.get_nowait()
 
-            # --- Update Altitude Graph ---
-            self.altitude_history.pop(0)
-            self.altitude_history.append(telemetry.get('altitude', 0))
-            self.ax.clear()
-            self.ax.plot(self.altitude_history)
-            self.ax.set_title("Altitude (m)")
-            self.ax.set_xticklabels([]) # Hide x-axis labels for clarity
-            self.canvas.draw()
+            if data.get("type") == "telemetry":
+                telemetry = data.get("payload", {})
+                self.telemetry_labels["Lat:"].configure(text=f"Lat: {telemetry.get('latitude', 0):.6f}")
+                self.telemetry_labels["Lon:"].configure(text=f"Lon: {telemetry.get('longitude', 0):.6f}")
+                self.telemetry_labels["Alt:"].configure(text=f"Alt: {telemetry.get('altitude', 0):.2f} m")
+                self.telemetry_labels["Speed:"].configure(text=f"Speed: {telemetry.get('speed', 0):.2f} m/s")
+                self.telemetry_labels["Heading:"].configure(text=f"Heading: {telemetry.get('heading', 0):.1f}°")
+                self.telemetry_labels["Battery:"].configure(text=f"Battery: {telemetry.get('battery_percentage', 0):.1f}%")
+                self.telemetry_labels["Voltage:"].configure(text=f"Voltage: {telemetry.get('voltage', 0):.2f}V")
+
+                # --- Update Altitude Graph ---
+                self.altitude_history.pop(0)
+                self.altitude_history.append(telemetry.get('altitude', 0))
+                self.ax.clear()
+                self.ax.plot(self.altitude_history)
+                self.ax.set_title("Altitude (m)")
+                self.ax.set_xticklabels([]) # Hide x-axis labels for clarity
+                self.canvas.draw()
+
+            elif data.get("type") == "status":
+                self.update_connection_status(data.get("connected"))
 
         except queue.Empty:
-            pass # No new telemetry data
+            pass # No new data
 
         # --- Update Video ---
         try:
-            frame = self.video_queue.get_nowait()
+            frame = self.video_queue.get_nowait() # This is now an RGB frame
             # Get the size of the video_frame to resize the image appropriately
             frame_w = self.video_frame.winfo_width()
             frame_h = self.video_frame.winfo_height()
 
-            img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            img = Image.fromarray(frame) # Directly use the RGB frame
             ctk_image = customtkinter.CTkImage(img, size=(frame_w - 20, frame_h - 20)) # -20 for padding
             self.video_label.configure(image=ctk_image, text="")
         except queue.Empty:
@@ -142,19 +153,30 @@ class Dashboard(customtkinter.CTk):
 
 def video_receiver_thread(video_q):
     """
-    Thread function to receive UDP video frames.
+    Thread function to receive UDP video frames, correct color, and relay them.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind(("0.0.0.0", VIDEO_PORT))
         print(f"INFO: Video receiver listening on port {VIDEO_PORT}")
         while True:
             try:
-                packet, _ = sock.recvfrom(65536) # Buffer size
+                packet, _ = sock.recvfrom(65536)  # Buffer size
+
+                # Relay the raw packet immediately
+                if RELAY_VIDEO_STREAM:
+                    for target_ip, target_port in RELAY_TARGETS:
+                        sock.sendto(packet, (target_ip, target_port))
+
+                # Decode for local display
                 np_arr = np.frombuffer(packet, np.uint8)
                 image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
                 if image is not None:
+                    # Convert from BGR (OpenCV) to RGB (Pillow/Tkinter)
+                    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                     try:
-                        video_q.put_nowait(image)
+                        # Put the corrected image on the queue for the GUI
+                        video_q.put_nowait(rgb_image)
                     except queue.Full:
                         # Discard frame if GUI is lagging
                         pass
@@ -168,20 +190,20 @@ def websocket_server_thread(telemetry_q, dashboard_ref):
     async def handler(websocket):
         """Handles incoming WebSocket connections."""
         print(f"INFO: Onboard client connected from {websocket.remote_address}")
-        # Use lambda to schedule GUI update in main thread
-        dashboard_ref.after(0, lambda: dashboard_ref.update_connection_status(True))
+        telemetry_q.put({'type': 'status', 'connected': True})
         try:
             async for message in websocket:
                 try:
                     data = json.loads(message)
+                    # The onboard client now sends a dict with type and payload
                     if data.get('type') == 'telemetry':
-                        telemetry_q.put(data.get('payload')) # This is a thread-safe queue
+                        telemetry_q.put(data) # Put the whole dict in the queue
                 except json.JSONDecodeError:
                     print(f"WARN: Received non-JSON message from client.")
         except websockets.exceptions.ConnectionClosed:
             print(f"INFO: Onboard client disconnected.")
         finally:
-            dashboard_ref.after(0, lambda: dashboard_ref.update_connection_status(False))
+            telemetry_q.put({'type': 'status', 'connected': False})
 
     async def start_server():
         """Starts the WebSocket server."""
