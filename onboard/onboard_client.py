@@ -7,7 +7,6 @@ import websockets
 from picamera2 import Picamera2
 from concurrent.futures import ThreadPoolExecutor
 import socket
-from mavsdk import System
 
 # --- CONFIGURATION ---
 SIMULATE_TELEMETRY = True  # Set to False to use a real Pixhawk
@@ -55,65 +54,25 @@ class SimulatedTelemetrySource:
         }
 
 class MavsdkTelemetrySource:
-    """Connects to a Pixhawk and streams telemetry via MAVSDK."""
+    """Placeholder for real MAVSDK telemetry source."""
     def __init__(self):
-        self.drone = System()
-        self.latitude = None
-        self.longitude = None
-        self.altitude = None
-        self.battery_percentage = None
-        self.voltage = None
-        self.heading = None
-        self.speed = None
-        self.connection_string = "serial:///dev/ttyACM0:57600"
-        print("INFO: Initialized MavsdkTelemetrySource.")
-
-    async def connect(self):
-        print(f"INFO: Connecting to drone at {self.connection_string}...")
-        await self.drone.connect(system_address=self.connection_string)
-
-        print("INFO: Waiting for drone to connect...")
-        async for state in self.drone.core.connection_state():
-            if state.is_connected:
-                print("INFO: Drone connected!")
-                break
-
-        # Start background tasks to update telemetry
-        asyncio.create_task(self._update_position())
-        asyncio.create_task(self._update_battery())
-        asyncio.create_task(self._update_heading())
-        asyncio.create_task(self._update_speed())
-        print("INFO: MAVSDK telemetry update tasks started.")
-
-    async def _update_position(self):
-        async for position in self.drone.telemetry.position():
-            self.latitude = position.latitude_deg
-            self.longitude = position.longitude_deg
-            self.altitude = position.relative_altitude_m
-
-    async def _update_battery(self):
-        async for battery in self.drone.telemetry.battery():
-            self.battery_percentage = battery.remaining_percent * 100
-            self.voltage = battery.voltage_v
-
-    async def _update_heading(self):
-        async for heading in self.drone.telemetry.heading():
-            self.heading = heading.heading_deg
-
-    async def _update_speed(self):
-        async for speed in self.drone.telemetry.velocity_ned():
-            self.speed = (speed.north_m_s**2 + speed.east_m_s**2)**0.5
+        # In a real implementation, this would connect to the Pixhawk
+        print("INFO: Initialized MavsdkTelemetrySource (Placeholder).")
+        pass
 
     async def get_telemetry(self):
-        """Returns the latest available telemetry data."""
+        # This would contain the async for loops to get real data
+        # For now, it returns a static dictionary.
+        print("WARN: MavsdkTelemetrySource.get_telemetry() is a placeholder.")
+        await asyncio.sleep(1) # Simulate async delay
         return {
-            'latitude': self.latitude,
-            'longitude': self.longitude,
-            'altitude': self.altitude,
-            'battery_percentage': self.battery_percentage,
-            'voltage': self.voltage,
-            'heading': self.heading,
-            'speed': self.speed
+            'latitude': 47.3977,
+            'longitude': 8.5456,
+            'altitude': 500.0,
+            'battery_percentage': 80.0,
+            'voltage': 16.2,
+            'heading': 180.0,
+            'speed': 15.0
         }
 
 def video_producer_sync(udp_socket, gcs_address):
@@ -177,12 +136,8 @@ async def run():
     if SIMULATE_TELEMETRY:
         telemetry_source = SimulatedTelemetrySource()
     else:
+        # NOTE: This is currently a placeholder
         telemetry_source = MavsdkTelemetrySource()
-        try:
-            await telemetry_source.connect()
-        except Exception as e:
-            print(f"FATAL: Could not connect to drone: {e}. Is it powered and connected?")
-            return # Exit if we can't connect
 
     # --- Initialize Video UDP Socket ---
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
