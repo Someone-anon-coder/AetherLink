@@ -174,7 +174,8 @@ def video_receiver_thread(video_q):
 
             if image is not None:
                 # Convert from BGR (OpenCV default) to RGB (Pillow/Tkinter standard)
-                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                # rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                rgb_image = image
                 try:
                     video_q.put_nowait(rgb_image)
                 except queue.Full:
