@@ -5,3 +5,4 @@ numpy
 customtkinter
 Pillow
 haversine
+mavsdk

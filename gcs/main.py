@@ -1,7 +1,6 @@
 import asyncio
 import websockets
 import json
-import base64
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -10,24 +9,122 @@ from PIL import Image, ImageTk
 import threading
 import queue
 import socket
+import argparse
+import datetime
+import csv
+import os
+from mavsdk import System
 
 # --- CONFIGURATION ---
 WEBSOCKET_PORT = 8765
 VIDEO_PORT = 9999
+SITL_MAVSDK_PORT = 5763
+
+class FlightLogger:
+    def __init__(self, log_dir="flight_logs"):
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.log_file_path = os.path.join(log_dir, f"flight_log_{timestamp}.csv")
+
+        self.file = open(self.log_file_path, 'w', newline='')
+        self.writer = csv.writer(self.file)
+
+        self.header = [
+            "timestamp", "latitude", "longitude", "relative_altitude_m",
+            "speed_m_s", "heading_deg", "battery_percent", "battery_voltage"
+        ]
+        self.writer.writerow(self.header)
+        print(f"INFO: Flight logger initialized. Log file: {self.log_file_path}")
+
+    def log(self, telemetry_data):
+        try:
+            log_entry = [telemetry_data.get(key, 'N/A') for key in self.header]
+            self.writer.writerow(log_entry)
+        except Exception as e:
+            print(f"ERROR: Could not write to log file: {e}")
+
+    def close(self):
+        self.file.close()
+
+class TelemetryHub:
+    def __init__(self, mode, output_queue):
+        self.mode = mode
+        self.output_queue = output_queue
+        self.drone = System()
+
+    async def start(self):
+        if self.mode == 'sitl':
+            await self._run_sitl_producer()
+        # 'real' mode is handled by the WebSocket server
+
+    async def _run_sitl_producer(self):
+        print("INFO: Starting TelemetryHub in SITL mode.")
+        await self.drone.connect(system_address=f"udp://:{SITL_MAVSDK_PORT}")
+
+        print("INFO: Waiting for SITL drone to connect...")
+        async for state in self.drone.core.connection_state():
+            if state.is_connected:
+                print("INFO: SITL drone connected!")
+                break
+
+        asyncio.ensure_future(self._stream_telemetry())
+
+    async def _stream_telemetry(self):
+        # Create concurrent tasks for each telemetry stream
+        position_task = asyncio.ensure_future(self._get_telemetry_stream(self.drone.telemetry.position()))
+        heading_task = asyncio.ensure_future(self._get_telemetry_stream(self.drone.telemetry.heading()))
+        velocity_task = asyncio.ensure_future(self._get_telemetry_stream(self.drone.telemetry.velocity_ned()))
+        battery_task = asyncio.ensure_future(self._get_telemetry_stream(self.drone.telemetry.battery()))
+
+        while True:
+            # Wait for all telemetry to be updated
+            await asyncio.gather(position_task, heading_task, velocity_task, battery_task)
+
+            position = position_task.result()
+            heading = heading_task.result()
+            velocity = velocity_task.result()
+            battery = battery_task.result()
+
+            if all([position, heading, velocity, battery]):
+                telemetry_data = {
+                    'latitude': position.latitude_deg,
+                    'longitude': position.longitude_deg,
+                    'relative_altitude_m': position.relative_altitude_m,
+                    'speed_m_s': (velocity.north_m_s**2 + velocity.east_m_s**2)**0.5,
+                    'heading_deg': heading.heading_deg,
+                    'battery_percent': battery.remaining_percent * 100,
+                    'battery_voltage': battery.voltage_v,
+                    'timestamp': datetime.datetime.now().isoformat()
+                }
+                await self.output_queue.put(telemetry_data)
+
+            # Reset tasks to fetch the next update
+            position_task = asyncio.ensure_future(self._get_telemetry_stream(self.drone.telemetry.position()))
+            heading_task = asyncio.ensure_future(self._get_telemetry_stream(self.drone.telemetry.heading()))
+            velocity_task = asyncio.ensure_future(self._get_telemetry_stream(self.drone.telemetry.velocity_ned()))
+            battery_task = asyncio.ensure_future(self._get_telemetry_stream(self.drone.telemetry.battery()))
+
+    async def _get_telemetry_stream(self, stream):
+        async for item in stream:
+            return item
+
+    async def handle_real_telemetry(self, telemetry_payload):
+        if self.mode == 'real':
+            telemetry_payload['timestamp'] = datetime.datetime.now().isoformat()
+            await self.output_queue.put(telemetry_payload)
+
 
 class DataProcessor:
     def __init__(self):
         self.model = YOLO('best.pt')
         print("INFO: YOLO model loaded.")
 
-    def process_video_frame(self, image):
-        """Processes a single video frame for object detection."""
-        if image is None:
-            print("WARN: AI processor received an empty frame.")
-            return None, []
+    def process_frame(self, image):
+        if image is None: return None, []
         try:
             results = self.model(image, verbose=False)
-
             detections = []
             for result in results:
                 for box in result.boxes:
@@ -40,53 +137,16 @@ class DataProcessor:
                         "confidence": confidence,
                         "box": [x1, y1, x2, y2]
                     })
-
-            # print(f"DEBUG: Processed video frame, found {len(detections)} detections.")
             return image, detections
         except Exception as e:
-            print(f"ERROR: Error processing video frame: {e}")
+            print(f"ERROR: AI processing failed: {e}")
             return image, []
 
-class GCSApp:
-    def __init__(self):
-        self.data_processor = DataProcessor()
-        self.video_for_gui_queue = queue.Queue(maxsize=1) 
-        self.telemetry_for_gui_queue = queue.Queue(maxsize=1)
-        self.detections_for_mission_logic_queue = asyncio.Queue(maxsize=10)
-        self.telemetry_for_mission_logic_queue = asyncio.Queue(maxsize=10)
-
-    async def websocket_handler(self, websocket):
-        print(f"INFO: Onboard system connected from {websocket.remote_address}")
-        try:
-            async for message in websocket:
-                try:
-                    data = json.loads(message)
-                    if data.get('type') == 'telemetry':
-                        payload = data.get('payload')
-                        # print(f"DEBUG: Received TELEMETRY packet: {payload}")
-                        self.telemetry_for_gui_queue.put(payload)
-                        await self.telemetry_for_mission_logic_queue.put(payload)
-                    else:
-                        print(f"WARN: Received message with unknown type: {data.get('type')}")
-                except json.JSONDecodeError:
-                    print(f"WARN: Received non-JSON message: {message}")
-        except websockets.ConnectionClosed as e:
-            print(f"INFO: Connection with {websocket.remote_address} closed: {e}")
-        finally:
-            print(f"INFO: Onboard system {websocket.remote_address} disconnected.")
-
-    async def start_server(self):
-        HOST = "0.0.0.0"
-        async with websockets.serve(self.websocket_handler, HOST, WEBSOCKET_PORT):
-            print(f"INFO: GCS WebSocket server started on ws://{HOST}:{WEBSOCKET_PORT}")
-            await asyncio.Future()
-
 class Dashboard(customtkinter.CTk):
-    def __init__(self, video_queue, telemetry_queue):
+    def __init__(self, video_q, telemetry_q):
         super().__init__()
-
-        self.video_queue = video_queue
-        self.telemetry_queue = telemetry_queue
+        self.video_queue = video_q
+        self.telemetry_queue = telemetry_q
 
         self.title("AetherLink GCS")
         self.geometry("1280x720")
@@ -95,151 +155,168 @@ class Dashboard(customtkinter.CTk):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # Video Frame
         self.video_label = customtkinter.CTkLabel(self, text="Waiting for video feed...")
         self.video_label.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
-        # Data Frame
         self.data_frame = customtkinter.CTkFrame(self)
         self.data_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
         self.data_frame.grid_columnconfigure(0, weight=1)
 
+        # Connection Status
+        self.conn_status_label = customtkinter.CTkLabel(self.data_frame, text="DISCONNECTED", text_color="red", font=customtkinter.CTkFont(size=16, weight="bold"))
+        self.conn_status_label.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+
         # Telemetry
         self.telemetry_label = customtkinter.CTkLabel(self.data_frame, text="Telemetry", font=customtkinter.CTkFont(size=20, weight="bold"))
-        self.telemetry_label.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        self.telemetry_label.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
         self.lat_label = customtkinter.CTkLabel(self.data_frame, text="Lat: N/A")
-        self.lat_label.grid(row=1, column=0, padx=10, pady=2, sticky="w")
+        self.lat_label.grid(row=2, column=0, padx=10, pady=2, sticky="w")
         self.lon_label = customtkinter.CTkLabel(self.data_frame, text="Lon: N/A")
-        self.lon_label.grid(row=2, column=0, padx=10, pady=2, sticky="w")
+        self.lon_label.grid(row=3, column=0, padx=10, pady=2, sticky="w")
         self.alt_label = customtkinter.CTkLabel(self.data_frame, text="Alt: N/A")
-        self.alt_label.grid(row=3, column=0, padx=10, pady=2, sticky="w")
-        self.v_ground_label = customtkinter.CTkLabel(self.data_frame, text="V Gnd: N/A")
-        self.v_ground_label.grid(row=4, column=0, padx=10, pady=2, sticky="w")
+        self.alt_label.grid(row=4, column=0, padx=10, pady=2, sticky="w")
+        self.speed_label = customtkinter.CTkLabel(self.data_frame, text="Speed: N/A")
+        self.speed_label.grid(row=5, column=0, padx=10, pady=2, sticky="w")
         self.heading_label = customtkinter.CTkLabel(self.data_frame, text="Heading: N/A")
-        self.heading_label.grid(row=5, column=0, padx=10, pady=2, sticky="w")
-
-        # Mission State
-        self.mission_state_label = customtkinter.CTkLabel(self.data_frame, text="Mission State", font=customtkinter.CTkFont(size=20, weight="bold"))
-        self.mission_state_label.grid(row=6, column=0, padx=10, pady=(20, 10), sticky="ew")
-        self.current_state_label = customtkinter.CTkLabel(self.data_frame, text="STANDBY", text_color="yellow", font=customtkinter.CTkFont(size=16))
-        self.current_state_label.grid(row=7, column=0, padx=10, pady=2, sticky="ew")
+        self.heading_label.grid(row=6, column=0, padx=10, pady=2, sticky="w")
+        self.battery_label = customtkinter.CTkLabel(self.data_frame, text="Battery: N/A")
+        self.battery_label.grid(row=7, column=0, padx=10, pady=2, sticky="w")
 
         self.update_widgets()
 
+    def update_connection_status(self, is_connected):
+        if is_connected:
+            self.conn_status_label.configure(text="CONNECTED", text_color="green")
+        else:
+            self.conn_status_label.configure(text="DISCONNECTED", text_color="red")
+
     def update_widgets(self):
-        # Update telemetry
         try:
             telemetry = self.telemetry_queue.get_nowait()
-            self.lat_label.configure(text=f"Lat: {telemetry.get('latitude', 'N/A'):.6f}")
-            self.lon_label.configure(text=f"Lon: {telemetry.get('longitude', 'N/A'):.6f}")
-            self.alt_label.configure(text=f"Alt: {telemetry.get('altitude', 'N/A'):.2f} m")
-            self.v_ground_label.configure(text=f"V Gnd: {telemetry.get('speed', 'N/A'):.2f} m/s")
-            self.heading_label.configure(text=f"Heading: {telemetry.get('heading', 'N/A'):.2f}°")
+            self.lat_label.configure(text=f"Lat: {telemetry.get('latitude', 0):.6f}")
+            self.lon_label.configure(text=f"Lon: {telemetry.get('longitude', 0):.6f}")
+            self.alt_label.configure(text=f"Alt: {telemetry.get('relative_altitude_m', 0):.2f} m")
+            self.speed_label.configure(text=f"Speed: {telemetry.get('speed_m_s', 0):.2f} m/s")
+            self.heading_label.configure(text=f"Heading: {telemetry.get('heading_deg', 0):.2f}°")
+            self.battery_label.configure(text=f"Battery: {telemetry.get('battery_percent', 0):.1f}% ({telemetry.get('battery_voltage', 0):.2f}V)")
         except queue.Empty:
             pass
 
-        # Update video
         try:
             frame = self.video_queue.get_nowait()
-            if frame is not None:
-                img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(img)
-                ctk_image = customtkinter.CTkImage(light_image=img, dark_image=img, size=(960, 540))
-                self.video_label.configure(image=ctk_image, text="")
+            img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            ctk_image = customtkinter.CTkImage(Image.fromarray(img), size=(960, 540))
+            self.video_label.configure(image=ctk_image, text="")
         except queue.Empty:
             pass
 
         self.after(33, self.update_widgets)
 
-def run_gui(video_queue, telemetry_queue):
-    app = Dashboard(video_queue, telemetry_queue)
-    app.mainloop()
+class GCSApp:
+    def __init__(self, mode):
+        self.mode = mode
+        self.flight_logger = FlightLogger()
+        self.data_processor = DataProcessor()
 
-def video_receiver_thread(app):
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.bind(("0.0.0.0", VIDEO_PORT))
-        print(f"INFO: UDP video receiver listening on port {VIDEO_PORT}")
-        while True:
-            packet, _ = sock.recvfrom(65536) 
-            np_arr = np.frombuffer(packet, np.uint8)
-            image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            if image is not None:
-                try:
-                    app.video_for_gui_queue.put(image, block=False)
-                except queue.Full:
-                    pass # Discard frame if GUI is lagging
+        self.video_q_for_gui = queue.Queue(maxsize=1)
+        self.video_q_for_ai = queue.Queue(maxsize=1)
+        self.telemetry_q_for_gui = queue.Queue(maxsize=10)
+        self.telemetry_q_for_logic = asyncio.Queue(maxsize=10)
+        self.detections_q_for_logic = asyncio.Queue(maxsize=10)
+        self.telemetry_hub_output_q = asyncio.Queue(maxsize=10)
 
-def ai_processing_thread(app, main_loop):
-    """
-    Thread to run AI inference on video frames.
-    """
-    while True:
+        self.dashboard = Dashboard(self.video_q_for_gui, self.telemetry_q_for_gui)
+        self.telemetry_hub = TelemetryHub(self.mode, self.telemetry_hub_output_q)
+        self.main_loop = None
+
+    async def websocket_handler(self, websocket):
+        print(f"INFO: Onboard system connected from {websocket.remote_address}")
+        self.main_loop.call_soon_threadsafe(self.dashboard.update_connection_status, True)
         try:
-            frame = app.video_for_gui_queue.get(timeout=1)
-            _, detections = app.data_processor.process_video_frame(frame)
-            if detections:
-                future = asyncio.run_coroutine_threadsafe(
-                    app.detections_for_mission_logic_queue.put(detections),
-                    main_loop
-                )
-                future.result(timeout=1)
-        except queue.Empty:
-            continue
-        except Exception as e:
-            print(f"ERROR: AI processing thread error: {e}")
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    if data.get('type') == 'telemetry':
+                        await self.telemetry_hub.handle_real_telemetry(data.get('payload'))
+                except json.JSONDecodeError:
+                    print(f"WARN: Received non-JSON message")
+        finally:
+            print(f"INFO: Onboard system disconnected.")
+            self.main_loop.call_soon_threadsafe(self.dashboard.update_connection_status, False)
 
+    async def start(self):
+        self.main_loop = asyncio.get_running_loop()
 
-async def mission_logic_detections_consumer(app):
-    while True:
-        detections = await app.detections_for_mission_logic_queue.get()
-        print(f"MISSION_LOGIC: Received {len(detections)} detections.")
+        # Start Threads
+        threading.Thread(target=self.run_gui, daemon=True).start()
+        threading.Thread(target=self.video_receiver, daemon=True).start()
+        threading.Thread(target=self.ai_processor, daemon=True).start()
 
-async def mission_logic_telemetry_consumer(app):
-    while True:
-        telemetry = await app.telemetry_for_mission_logic_queue.get()
-        print(f"MISSION_LOGIC: Received telemetry: {telemetry}")
+        # Start Async Tasks
+        server = websockets.serve(self.websocket_handler, "0.0.0.0", WEBSOCKET_PORT)
 
-async def main():
-    app = GCSApp()
+        await asyncio.gather(
+            server,
+            self.telemetry_hub.start(),
+            self._distribute_data()
+        )
 
-    gui_thread = threading.Thread(
-        target=run_gui,
-        args=(app.video_for_gui_queue, app.telemetry_for_gui_queue),
-        daemon=True
-    )
-    video_thread = threading.Thread(
-        target=video_receiver_thread,
-        args=(app,),
-        daemon=True
-    )
-    ai_thread = threading.Thread(
-        target=ai_processing_thread,
-        args=(app,),
-        daemon=True
-    )
+    def run_gui(self):
+        self.dashboard.mainloop()
 
-    main_loop = asyncio.get_running_loop()
+    def video_receiver(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.bind(("0.0.0.0", VIDEO_PORT))
+            while True:
+                packet, _ = sock.recvfrom(65536)
+                np_arr = np.frombuffer(packet, np.uint8)
+                image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                if image is not None:
+                    try: self.video_q_for_gui.put_nowait(image)
+                    except queue.Full: pass
+                    try: self.video_q_for_ai.put_nowait(image)
+                    except queue.Full: pass
 
-    gui_thread.start()
-    video_thread.start()
-    
-    # Pass the main asyncio loop to the AI thread
-    ai_thread = threading.Thread(
-        target=ai_processing_thread,
-        args=(app, main_loop),
-        daemon=True
-    )
-    ai_thread.start()
+    def ai_processor(self):
+        while True:
+            try:
+                frame = self.video_q_for_ai.get(timeout=1)
+                _, detections = self.data_processor.process_frame(frame)
+                if detections:
+                    asyncio.run_coroutine_threadsafe(
+                        self.detections_q_for_logic.put(detections), self.main_loop
+                    ).result(timeout=1)
+            except queue.Empty:
+                continue
 
-    await asyncio.gather(
-        app.start_server(),
-        mission_logic_detections_consumer(app),
-        mission_logic_telemetry_consumer(app)
-    )
+    async def _distribute_data(self):
+        while True:
+            telemetry = await self.telemetry_hub_output_q.get()
+
+            # Log to CSV
+            self.flight_logger.log(telemetry)
+
+            # Send to GUI
+            try: self.telemetry_q_for_gui.put_nowait(telemetry)
+            except queue.Full: pass
+
+            # Send to Mission Logic
+            try: await asyncio.wait_for(self.telemetry_q_for_logic.put(telemetry), timeout=0.01)
+            except asyncio.TimeoutError: pass
+
+def main():
+    parser = argparse.ArgumentParser(description="AetherLink GCS")
+    parser.add_argument('--mode', type=str, default='sitl', choices=['sitl', 'real'],
+                        help="Telemetry source mode ('sitl' or 'real')")
+    args = parser.parse_args()
+
+    app = GCSApp(mode=args.mode)
+    try:
+        asyncio.run(app.start())
+    except KeyboardInterrupt:
+        print("INFO: Shutting down GCS...")
+    finally:
+        app.flight_logger.close()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("INFO: Shutting down GCS application.")
-
+    main()
