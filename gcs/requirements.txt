@@ -1,8 +1,6 @@
 websockets
-ultralytics
-opencv-python
-numpy
 customtkinter
 Pillow
-haversine
-mavsdk
+opencv-python
+numpy
+matplotlib
