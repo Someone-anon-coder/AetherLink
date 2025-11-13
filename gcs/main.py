@@ -17,7 +17,7 @@ VIDEO_PORT = 9999
 
 # --- VIDEO FORWARDING CONFIGURATION ---
 ENABLE_VIDEO_FORWARDING = False # Set to True to forward the stream
-FORWARD_TO_IP = "100.x.x.x" # <-- USER: Set Tailscale IP of the second device (e.g., Pi with screen)
+FORWARD_TO_IP = "100.122.254.14" # <-- USER: Set Tailscale IP of the second device (e.g., Pi with screen)
 FORWARD_TO_PORT = 5600 # Standard video streaming port
 
 class Dashboard(customtkinter.CTk):
@@ -105,13 +105,13 @@ class Dashboard(customtkinter.CTk):
         # --- Update Telemetry ---
         try:
             telemetry = self.telemetry_queue.get_nowait()
-            self.telemetry_labels["Lat:"].configure(text=f"Lat: {telemetry.get('latitude', 0):.6f}")
-            self.telemetry_labels["Lon:"].configure(text=f"Lon: {telemetry.get('longitude', 0):.6f}")
-            self.telemetry_labels["Alt:"].configure(text=f"Alt: {telemetry.get('altitude', 0):.2f} m")
-            self.telemetry_labels["Speed:"].configure(text=f"Speed: {telemetry.get('speed', 0):.2f} m/s")
-            self.telemetry_labels["Heading:"].configure(text=f"Heading: {telemetry.get('heading', 0):.1f}°")
-            self.telemetry_labels["Battery:"].configure(text=f"Battery: {telemetry.get('battery_percentage', 0):.1f}%")
-            self.telemetry_labels["Voltage:"].configure(text=f"Voltage: {telemetry.get('voltage', 0):.2f}V")
+            self.telemetry_labels["Lat:"].configure(text=f"Lat: {telemetry.get('latitude', 0)}")
+            self.telemetry_labels["Lon:"].configure(text=f"Lon: {telemetry.get('longitude', 0)}")
+            self.telemetry_labels["Alt:"].configure(text=f"Alt: {telemetry.get('altitude', 0)} m")
+            self.telemetry_labels["Speed:"].configure(text=f"Speed: {telemetry.get('speed', 0)} m/s")
+            self.telemetry_labels["Heading:"].configure(text=f"Heading: {telemetry.get('heading', 0)}°")
+            self.telemetry_labels["Battery:"].configure(text=f"Battery: {telemetry.get('battery_percentage', 0)}%")
+            self.telemetry_labels["Voltage:"].configure(text=f"Voltage: {telemetry.get('voltage', 0)}V")
 
             # --- Update Altitude Graph ---
             self.altitude_history.pop(0)
@@ -174,7 +174,7 @@ def video_receiver_thread(video_q):
 
             if image is not None:
                 # Convert from BGR (OpenCV default) to RGB (Pillow/Tkinter standard)
-                # rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                #rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 rgb_image = image
                 try:
                     video_q.put_nowait(rgb_image)
