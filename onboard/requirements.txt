@@ -2,4 +2,3 @@ websockets
 opencv-python
 picamera2
 Pillow
-mavsdk
