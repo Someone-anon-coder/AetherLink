@@ -10,6 +10,7 @@ from PIL import Image, ImageTk
 import threading
 import queue
 import socket
+from mission_planner import MissionLogic
 
 # --- CONFIGURATION ---
 WEBSOCKET_PORT = 8765
@@ -40,8 +41,6 @@ class DataProcessor:
                         "confidence": confidence,
                         "box": [x1, y1, x2, y2]
                     })
-
-            # print(f"DEBUG: Processed video frame, found {len(detections)} detections.")
             return image, detections
         except Exception as e:
             print(f"ERROR: Error processing video frame: {e}")
@@ -52,20 +51,24 @@ class GCSApp:
         self.data_processor = DataProcessor()
         self.video_for_gui_queue = queue.Queue(maxsize=1) 
         self.telemetry_for_gui_queue = queue.Queue(maxsize=1)
-        self.detections_for_mission_logic_queue = asyncio.Queue(maxsize=10)
-        self.telemetry_for_mission_logic_queue = asyncio.Queue(maxsize=10)
+
+        self.command_queue = asyncio.Queue()
+        self.broadcast_queue = asyncio.Queue()
+        self.mission_logic = MissionLogic(self.command_queue, self.broadcast_queue)
 
     async def websocket_handler(self, websocket):
         print(f"INFO: Onboard system connected from {websocket.remote_address}")
+
+        sender_task = asyncio.create_task(self.command_and_broadcast_sender(websocket))
+
         try:
             async for message in websocket:
                 try:
                     data = json.loads(message)
                     if data.get('type') == 'telemetry':
                         payload = data.get('payload')
-                        # print(f"DEBUG: Received TELEMETRY packet: {payload}")
                         self.telemetry_for_gui_queue.put(payload)
-                        await self.telemetry_for_mission_logic_queue.put(payload)
+                        await self.mission_logic.process_telemetry(payload)
                     else:
                         print(f"WARN: Received message with unknown type: {data.get('type')}")
                 except json.JSONDecodeError:
@@ -73,7 +76,19 @@ class GCSApp:
         except websockets.ConnectionClosed as e:
             print(f"INFO: Connection with {websocket.remote_address} closed: {e}")
         finally:
+            sender_task.cancel()
             print(f"INFO: Onboard system {websocket.remote_address} disconnected.")
+
+    async def command_and_broadcast_sender(self, websocket):
+        async def sender(queue_obj):
+            while True:
+                message = await queue_obj.get()
+                await websocket.send(json.dumps(message))
+
+        await asyncio.gather(
+            sender(self.command_queue),
+            sender(self.broadcast_queue)
+        )
 
     async def start_server(self):
         HOST = "0.0.0.0"
@@ -179,7 +194,7 @@ def ai_processing_thread(app, main_loop):
             _, detections = app.data_processor.process_video_frame(frame)
             if detections:
                 future = asyncio.run_coroutine_threadsafe(
-                    app.detections_for_mission_logic_queue.put(detections),
+                    app.mission_logic.process_detections(detections),
                     main_loop
                 )
                 future.result(timeout=1)
@@ -188,19 +203,10 @@ def ai_processing_thread(app, main_loop):
         except Exception as e:
             print(f"ERROR: AI processing thread error: {e}")
 
-
-async def mission_logic_detections_consumer(app):
-    while True:
-        detections = await app.detections_for_mission_logic_queue.get()
-        print(f"MISSION_LOGIC: Received {len(detections)} detections.")
-
-async def mission_logic_telemetry_consumer(app):
-    while True:
-        telemetry = await app.telemetry_for_mission_logic_queue.get()
-        print(f"MISSION_LOGIC: Received telemetry: {telemetry}")
-
 async def main():
     app = GCSApp()
+
+    main_loop = asyncio.get_running_loop()
 
     gui_thread = threading.Thread(
         target=run_gui,
@@ -214,32 +220,18 @@ async def main():
     )
     ai_thread = threading.Thread(
         target=ai_processing_thread,
-        args=(app,),
-        daemon=True
-    )
-
-    main_loop = asyncio.get_running_loop()
-
-    gui_thread.start()
-    video_thread.start()
-    
-    # Pass the main asyncio loop to the AI thread
-    ai_thread = threading.Thread(
-        target=ai_processing_thread,
         args=(app, main_loop),
         daemon=True
     )
+
+    gui_thread.start()
+    video_thread.start()
     ai_thread.start()
 
-    await asyncio.gather(
-        app.start_server(),
-        mission_logic_detections_consumer(app),
-        mission_logic_telemetry_consumer(app)
-    )
+    await app.start_server()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("INFO: Shutting down GCS application.")
-
