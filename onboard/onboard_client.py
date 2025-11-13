@@ -7,6 +7,7 @@ import time
 from picamera2 import Picamera2
 from concurrent.futures import ThreadPoolExecutor
 import socket
+from telemetry import SimulatedTelemetryProvider, MavsdkTelemetryProvider
 
 # --- CONFIGURATION ---
 GCS_IP = "100.69.186.67"  # <-- USER: Set this to the Tailscale IP of the GCS laptop
@@ -15,6 +16,7 @@ GCS_VIDEO_PORT = 9999
 VIDEO_RESOLUTION = (640, 480)
 VIDEO_FRAMERATE = 30
 JPEG_QUALITY = 80
+USE_SIMULATED_TELEMETRY = True
 
 executor = ThreadPoolExecutor(max_workers=1)
 
@@ -44,17 +46,13 @@ def video_producer_sync(udp_socket, gcs_address):
 
 async def telemetry_producer(websocket):
     """
-    Coroutine to produce and send simulated telemetry data.
+    Coroutine to produce and send telemetry data from a selected provider.
     """
+    provider = SimulatedTelemetryProvider() if USE_SIMULATED_TELEMETRY else MavsdkTelemetryProvider()
+    await provider.connect()
+
     while True:
-        telemetry_data = {
-            'latitude': 12.34,
-            'longitude': 56.78,
-            'altitude': 150.5,
-            'speed': 25.2,
-            'heading': 90,
-            'timestamp': time.time()
-        }
+        telemetry_data = await provider.get_telemetry()
         message = json.dumps({
             'type': 'telemetry',
             'payload': telemetry_data
@@ -68,10 +66,33 @@ async def telemetry_producer(websocket):
 
 async def receiver(websocket):
     """
-    Coroutine to listen for incoming messages from the GCS.
+    Coroutine to listen for incoming messages from the GCS and execute commands.
     """
     async for message in websocket:
-        print(f"INFO: Received message from GCS: {message}")
+        try:
+            data = json.loads(message)
+            if data.get('type') == 'system_command':
+                command_name = data.get('command_name')
+                payload = data.get('payload', {})
+
+                if command_name == 'SET_SERVO':
+                    print(f"EXEC: Executing SET_SERVO command on servo {payload.get('servo_id')} with PWM {payload.get('pwm_value')}")
+                    # Future: MAVSDK drone.action.set_actuator() call here
+                elif command_name == 'GOTO_LOCATION':
+                    print(f"EXEC: Executing GOTO_LOCATION command to Lat: {payload.get('lat')}, Lon: {payload.get('lon')}, Alt: {payload.get('alt')}")
+                    # Future: MAVSDK drone.action.goto_location() call here
+                elif command_name == 'RTL':
+                    print("EXEC: Executing RTL (Return to Launch) command.")
+                    # Future: MAVSDK drone.action.return_to_launch() call here
+                else:
+                    print(f"WARN: Received unknown system command: {command_name}")
+            else:
+                 print(f"INFO: Received message from GCS: {message}")
+
+        except json.JSONDecodeError:
+            print(f"WARN: Received non-JSON message: {message}")
+        except Exception as e:
+            print(f"ERROR: Error processing command: {e}")
 
 async def run():
     """
