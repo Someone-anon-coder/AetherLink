@@ -15,6 +15,11 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 WEBSOCKET_PORT = 8765
 VIDEO_PORT = 9999
 
+# --- VIDEO FORWARDING CONFIGURATION ---
+ENABLE_VIDEO_FORWARDING = False # Set to True to forward the stream
+FORWARD_TO_IP = "100.x.x.x" # <-- USER: Set Tailscale IP of the second device (e.g., Pi with screen)
+FORWARD_TO_PORT = 5600 # Standard video streaming port
+
 class Dashboard(customtkinter.CTk):
     """Main GUI application window."""
     def __init__(self, video_q, telemetry_q):
@@ -127,7 +132,7 @@ class Dashboard(customtkinter.CTk):
             frame_w = self.video_frame.winfo_width()
             frame_h = self.video_frame.winfo_height()
 
-            img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            img = Image.fromarray(frame)
             ctk_image = customtkinter.CTkImage(img, size=(frame_w - 20, frame_h - 20)) # -20 for padding
             self.video_label.configure(image=ctk_image, text="")
         except queue.Empty:
@@ -144,22 +149,44 @@ def video_receiver_thread(video_q):
     """
     Thread function to receive UDP video frames.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.bind(("0.0.0.0", VIDEO_PORT))
-        print(f"INFO: Video receiver listening on port {VIDEO_PORT}")
-        while True:
-            try:
-                packet, _ = sock.recvfrom(65536) # Buffer size
-                np_arr = np.frombuffer(packet, np.uint8)
-                image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                if image is not None:
-                    try:
-                        video_q.put_nowait(image)
-                    except queue.Full:
-                        # Discard frame if GUI is lagging
-                        pass
-            except Exception as e:
-                print(f"ERROR: Video receiver failed: {e}")
+    # Create the main socket for receiving video
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", VIDEO_PORT))
+    print(f"INFO: Video receiver listening on port {VIDEO_PORT}")
+
+    # Create the forwarding socket if enabled
+    forwarding_socket = None
+    if ENABLE_VIDEO_FORWARDING:
+        forwarding_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print(f"INFO: Video forwarding enabled. Sending to {FORWARD_TO_IP}:{FORWARD_TO_PORT}")
+
+    while True:
+        try:
+            packet, _ = sock.recvfrom(65536) # Buffer size
+
+            # Forward the raw packet immediately
+            if ENABLE_VIDEO_FORWARDING and forwarding_socket:
+                forwarding_socket.sendto(packet, (FORWARD_TO_IP, FORWARD_TO_PORT))
+
+            # Decode for local display
+            np_arr = np.frombuffer(packet, np.uint8)
+            image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+            if image is not None:
+                # Convert from BGR (OpenCV default) to RGB (Pillow/Tkinter standard)
+                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                try:
+                    video_q.put_nowait(rgb_image)
+                except queue.Full:
+                    # Discard frame if GUI is lagging
+                    pass
+        except Exception as e:
+            print(f"ERROR: Video receiver failed: {e}")
+            break # Exit loop on error
+
+    sock.close()
+    if forwarding_socket:
+        forwarding_socket.close()
 
 def websocket_server_thread(telemetry_q, dashboard_ref):
     """
